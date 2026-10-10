@@ -1,0 +1,40 @@
+name: Windows checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run standard tests
+        run: cargo test --locked
+      - name: Check warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build portable application
+        shell: powershell
+        run: ./scripts/build_release.ps1
+      - name: Package application
+        shell: powershell
+        run: ./scripts/package_release.ps1
+      - name: Save portable build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Diskvale-windows-x64
+          path: |
+            artifacts/release/Diskvale-windows-x64.zip
+            artifacts/release/SHA256SUMS.txt
+          if-no-files-found: error

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="558" height="180" viewBox="0 0 558 180"><title>Diskvale logo</title><g transform="translate(-18 -12) scale(.8)">
+  <rect x="50" y="48" width="36" height="160" rx="10" fill="#8BE5D0"/>
+  <path d="M110 48H130C171 48 204 80 208 120H172C168 100 151 84 130 84H110Q102 84 102 76V56Q102 48 110 48Z" fill="#AAF0DD"/>
+  <path d="M172 136H208C204 176 171 208 130 208H110Q102 208 102 200V180Q102 172 110 172H130C151 172 168 152 172 136Z" fill="#4EBBDD"/>
+</g><text x="196" y="124" font-family="Segoe UI, Ubuntu, sans-serif" font-size="96" font-weight="600" letter-spacing="-3" fill="#EAF4F2">Diskvale</text></svg>

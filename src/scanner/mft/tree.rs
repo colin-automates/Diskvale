@@ -1,0 +1,192 @@
+use super::format::{self, Record};
+use crate::{
+    model::{Node, Scan, ScanStats},
+    scanner::Progress,
+};
+use std::{collections::HashMap, path::Path};
+
+pub(super) fn build(
+    root: &Path,
+    mut records: Vec<Record>,
+    progress: &Progress,
+    engine: &str,
+) -> Result<Scan, String> {
+    let cancelled = progress.cancelled();
+    let root_ref = records
+        .iter()
+        .find(|r| format::slot(r.reference) == 5 && r.directory)
+        .map(|r| r.reference);
+    let mut scan = Scan {
+        root: root.to_path_buf(),
+        nodes: vec![Node::new(root.display().to_string(), None, true)],
+        stats: ScanStats {
+            engine: engine.into(),
+            cancelled,
+            ..Default::default()
+        },
+    };
+    if root_ref.is_none() && !cancelled {
+        return Err("Missing NTFS root record".into());
+    }
+    let Some(root_ref) = root_ref else {
+        scan.stats
+            .notices
+            .push("Cancelled before the NTFS root was read; the partial tree is empty.".into());
+        return Ok(scan);
+    };
+    for record in &mut records {
+        record.normalize_names();
+        record
+            .finalize_streams(cancelled)
+            .map_err(|e| format!("NTFS record {}: {e}", format::slot(record.reference)))?;
+    }
+    // An active record with zero links need not belong to the directory namespace.
+    // Keep its accounting explicit rather than inventing a filesystem path for it.
+    for record in records.iter().filter(|r| r.names.is_empty()) {
+        if record.links != 0 && !cancelled {
+            return Err(format!(
+                "NTFS record {} has {} links but no file name",
+                format::slot(record.reference),
+                record.links
+            ));
+        }
+        scan.stats.unlinked_records += 1;
+        scan.stats.unlinked_logical_bytes = scan
+            .stats
+            .unlinked_logical_bytes
+            .checked_add(record.data.map_or(0, |s| s.0))
+            .ok_or("Unlinked logical size overflow")?;
+        scan.stats.unlinked_allocated_bytes = scan
+            .stats
+            .unlinked_allocated_bytes
+            .checked_add(record.allocation()?)
+            .ok_or("Unlinked allocation overflow")?;
+    }
+    records.retain(|r| !r.names.is_empty());
+    let mut dirs = HashMap::from([(root_ref, 0usize)]);
+    let mut pending = vec![];
+    for record in records
+        .iter()
+        .filter(|r| r.directory && r.reference != root_ref)
+    {
+        if record.names.len() != 1 {
+            if cancelled {
+                continue;
+            }
+            return Err("Unsupported NTFS directory names".into());
+        }
+        let id = scan.nodes.len();
+        let mut node = Node::new(record.names[0].text.clone(), None, true);
+        node.modified = record.modified;
+        scan.nodes.push(node);
+        dirs.insert(record.reference, id);
+        pending.push((id, record.names[0].parent));
+    }
+    for (id, parent) in pending {
+        if let Some(&parent) = dirs.get(&parent) {
+            if parent == id && !cancelled {
+                return Err("Cyclic NTFS directory".into());
+            }
+            scan.nodes[id].parent = Some(parent);
+            scan.nodes[parent].children.push(id);
+        } else if !cancelled {
+            return Err(
+                "NTFS directory parent is missing or reused; rescan the live volume".into(),
+            );
+        }
+    }
+    let mut seen = vec![false; scan.nodes.len()];
+    let mut stack = vec![0];
+    while let Some(id) = stack.pop() {
+        if seen[id] {
+            return Err("Cyclic NTFS directory graph".into());
+        }
+        seen[id] = true;
+        stack.extend(scan.nodes[id].children.iter().copied());
+    }
+    if !cancelled && seen.iter().any(|s| !*s) {
+        return Err("Detached or cyclic NTFS directory graph".into());
+    }
+    if cancelled {
+        let mut remap = vec![usize::MAX; scan.nodes.len()];
+        let mut retained = vec![];
+        for (id, node) in std::mem::take(&mut scan.nodes).into_iter().enumerate() {
+            if seen[id] {
+                remap[id] = retained.len();
+                retained.push(node);
+            } else {
+                scan.stats.errors += 1;
+            }
+        }
+        for node in &mut retained {
+            node.parent = node.parent.map(|p| remap[p]);
+            node.children.retain(|&id| seen[id]);
+            for id in &mut node.children {
+                *id = remap[*id];
+            }
+        }
+        dirs.retain(|_, id| {
+            let new = remap[*id];
+            *id = new;
+            new != usize::MAX
+        });
+        scan.nodes = retained;
+    }
+    scan.stats.folders = scan.nodes.len().saturating_sub(1) as u64;
+    for record in records.into_iter().filter(|r| !r.directory) {
+        if !cancelled && progress.cancelled() {
+            scan.stats.cancelled = true;
+            break;
+        }
+        if record.names.is_empty() {
+            if cancelled {
+                scan.stats.errors += 1;
+                continue;
+            }
+            return Err(format!(
+                "NTFS record {} has no file name",
+                format::slot(record.reference)
+            ));
+        }
+        let allocated = record.allocation()?;
+        let logical = record.data.map_or(0, |s| s.0);
+        let incomplete = record.incomplete;
+        let mut linked = false;
+        for name in record.names {
+            let Some(&parent) = dirs.get(&name.parent) else {
+                if cancelled {
+                    scan.stats.errors += 1;
+                    continue;
+                }
+                return Err("NTFS file parent is missing or reused; rescan the live volume".into());
+            };
+            let mut node = Node::new(name.text, Some(parent), false);
+            node.logical = logical;
+            node.allocated = if linked { 0 } else { allocated };
+            node.shared = linked;
+            node.modified = record.modified;
+            node.allocation_unknown = incomplete;
+            if incomplete {
+                scan.stats.unknown_allocations += 1;
+            }
+            if linked {
+                scan.stats.shared_links += 1;
+            }
+            linked = true;
+            let id = scan.nodes.len();
+            scan.nodes.push(node);
+            scan.nodes[parent].children.push(id);
+            scan.stats.files += 1;
+        }
+    }
+    scan.stats.cancelled |= progress.cancelled();
+    if scan.stats.unlinked_records > 0 {
+        scan.stats.notices.push(format!("{} active NTFS records have no directory names and are excluded from the visible tree; their data totals {} logical and {} allocated bytes.",scan.stats.unlinked_records,scan.stats.unlinked_logical_bytes,scan.stats.unlinked_allocated_bytes));
+    }
+    scan.stats.notices.push("Experimental accounting includes named data streams and NTFS metadata files. Directory index allocation and volume overhead are not included; a live scan is not an atomic snapshot.".into());
+    if scan.stats.cancelled {
+        scan.stats.notices.push("Cancelled: only records with a complete parent chain are included in this partial result.".into());
+    }
+    scan.finish();
+    Ok(scan)
+}
