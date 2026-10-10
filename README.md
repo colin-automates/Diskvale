@@ -7,7 +7,7 @@
 
 Diskvale turns an NTFS drive into an interactive map so you can see what takes up space, find large files, and explore folders. It runs locally as a native desktop application.
 
-[Download for Windows](https://github.com/colin-automates/Diskvale/releases/latest) · [Watch the 30-second demo](https://github.com/colin-automates/Diskvale/blob/main/docs/media/diskvale-demo.mp4) · [How it works](#how-it-works) · [Build from source](#build-from-source)
+[Download for Windows](https://github.com/colin-automates/Diskvale/releases/latest) · [Watch the 30-second demo](https://colin-automates.github.io/Diskvale/) · [How it works](#how-it-works) · [Build from source](#build-from-source)
 
 ![Diskvale exploring a studio drive](docs/media/diskvale.png)
 
@@ -29,9 +29,9 @@ SHA-256 checksums accompany each release. From PowerShell, `Get-FileHash .\Diskv
 
 ## Demo
 
-[![Play the Diskvale demo](docs/media/demo-poster.png)](https://github.com/colin-automates/Diskvale/blob/main/docs/media/diskvale-demo.mp4)
+[![Play the Diskvale demo](docs/media/demo-poster.png)](https://colin-automates.github.io/Diskvale/)
 
-**[Watch the 30-second video](https://github.com/colin-automates/Diskvale/blob/main/docs/media/diskvale-demo.mp4)** · **[Download the MP4](https://github.com/colin-automates/Diskvale/releases/latest/download/Diskvale-Demo.mp4)**
+**[Watch the 30-second video](https://colin-automates.github.io/Diskvale/)** · **[Download the MP4](https://github.com/colin-automates/Diskvale/releases/latest/download/Diskvale-Demo.mp4)**
 
 The tour uses the actual application UI with a generated studio drive. Demo source and rendering instructions are in [tools/demo-video](tools/demo-video/README.md).
 

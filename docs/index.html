@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Watch Diskvale's 30-second demo. An open-source Windows disk space explorer, built in Rust.">
+  <meta name="theme-color" content="#101b21">
+  <title>Diskvale — Demo</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; background: #101b21; color: #eaf4f2; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100svh; }
+    main { width: min(1200px, 100%); margin: 0 auto; padding: 48px 24px 32px; }
+    header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+    h1 { margin: 0; font-weight: 600; font-size: clamp(28px, 5vw, 42px); letter-spacing: -.04em; }
+    header p { margin: 0; color: #8be5d0; }
+    video { display: block; width: 100%; height: auto; background: #0d1419; border: 1px solid #30464f; border-radius: 14px; }
+    nav { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
+    a { color: #8be5d0; text-underline-offset: 4px; }
+    nav a { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 10px 20px; border: 1px solid #35505a; border-radius: 8px; text-decoration: none; }
+    nav a:first-child { background: #8be5d0; border-color: #8be5d0; color: #10262a; font-weight: 600; }
+    a:hover { filter: brightness(1.15); }
+    a:focus-visible, video:focus-visible { outline: 3px solid #65d0dc; outline-offset: 5px; }
+    footer { margin-top: 24px; color: #98adb7; font-size: 14px; line-height: 1.6; }
+    @media (max-width: 560px) { main { padding: 24px 16px; } header { display: block; } header p { margin-top: 8px; } nav a { flex: 1 1 auto; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>Diskvale</h1><p>Disk space, clearly.</p></header>
+    <video controls playsinline preload="metadata" poster="media/demo-poster.png" width="1920" height="1080" aria-label="Diskvale product demo">
+      <source src="media/diskvale-demo.mp4" type="video/mp4">
+      <a href="media/diskvale-demo.mp4">Download the demo video</a>
+    </video>
+    <nav aria-label="Project links">
+      <a href="https://github.com/colin-automates/Diskvale/releases/latest">Download for Windows</a>
+      <a href="https://github.com/colin-automates/Diskvale">Source and documentation</a>
+      <a href="media/diskvale-demo.mp4" download="Diskvale-Demo.mp4">Download video</a>
+    </nav>
+    <footer>Windows x64 · NTFS drives · MIT license<br>30-second tour of the application using generated demo data.</footer>
+  </main>
+</body>
+</html>
