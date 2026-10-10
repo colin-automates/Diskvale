@@ -3345,6 +3345,7 @@ mod tests {
     fn permanent_confirmation_revalidates_changed_file_before_operating() {
         use canopy::model::{Node, ScanStats};
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(workspace.join("artifacts")).unwrap();
         let fixture = tempfile::Builder::new()
             .prefix("canopy-confirm-guard-")
             .tempdir_in(workspace.join("artifacts"))

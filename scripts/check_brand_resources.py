@@ -15,12 +15,33 @@ def main():
         raise SystemExit("Windows resource verification requires Windows.")
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--executable", type=Path, default=root / "target/release/canopy.exe")
+    parser.add_argument("--executable", type=Path, default=root / "target/x86_64-pc-windows-msvc/release/canopy.exe")
     parser.add_argument("--output", type=Path, default=root / "artifacts/resource-checks")
     args = parser.parse_args()
     executable = args.executable.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    # Inspect the PE import table, rather than relying on compiler flags, to
+    # verify that portable releases do not need a separate Visual C++ runtime.
+    data = executable.read_bytes()
+    pe = struct.unpack_from("<I", data, 60)[0]
+    section_count = struct.unpack_from("<H", data, pe + 6)[0]
+    optional_size = struct.unpack_from("<H", data, pe + 20)[0]
+    optional = pe + 24
+    assert struct.unpack_from("<H", data, optional)[0] == 0x20B, "Expected a Windows x64 PE"
+    import_rva, _ = struct.unpack_from("<II", data, optional + 112 + 8)
+    sections = [struct.unpack_from("<IIII", data, optional + optional_size + i * 40 + 8) for i in range(section_count)]
+
+    def file_offset(rva):
+        return next(raw + (rva - address) for length, address, raw_size, raw in sections if address <= rva < address + max(length, raw_size))
+
+    imports = []
+    position = file_offset(import_rva)
+    while any(struct.unpack_from("<IIIII", data, position)):
+        start = file_offset(struct.unpack_from("<I", data, position + 12)[0])
+        imports.append(data[start:data.index(b"\0", start)].decode("ascii"))
+        position += 20
+    assert not any(name.upper().startswith(("VCRUNTIME", "MSVCP")) for name in imports), imports
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.LoadLibraryExW.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
     kernel.LoadLibraryExW.restype = wintypes.HMODULE
@@ -108,6 +129,8 @@ def main():
         "windows_large_and_small_icon_extraction": "passed",
         "windows_icons_extracted": extracted,
         "version_info": values,
+        "imported_windows_libraries": sorted(imports),
+        "separate_visual_cpp_runtime_required": False,
         "application_executed": False,
         "raw_volume_reads_performed": False,
     }

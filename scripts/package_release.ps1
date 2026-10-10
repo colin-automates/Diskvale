@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (-not $Executable) { $Executable = Join-Path $projectRoot 'target/release/canopy.exe' }
+if (-not $Executable) { $Executable = Join-Path $projectRoot 'target/x86_64-pc-windows-msvc/release/canopy.exe' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'artifacts/release' }
 $Executable = [IO.Path]::GetFullPath($Executable)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)

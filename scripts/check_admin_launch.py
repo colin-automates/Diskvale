@@ -48,7 +48,7 @@ def main():
         raise SystemExit("This validation requires Windows.")
     project = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--executable", type=Path, default=project / "target/release/canopy.exe")
+    parser.add_argument("--executable", type=Path, default=project / "target/x86_64-pc-windows-msvc/release/canopy.exe")
     parser.add_argument("--debug-executable", type=Path, default=project / "target/debug/canopy.exe")
     parser.add_argument("--output", type=Path, default=project / "artifacts/launch-checks")
     args = parser.parse_args()

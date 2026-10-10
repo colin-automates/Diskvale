@@ -23,7 +23,7 @@ Diskvale turns an NTFS drive into an interactive map so you can see what takes u
 2. Open `Diskvale.exe` and approve the Windows administrator prompt.
 3. Select an NTFS drive and click **Scan**. Use **Rescan** to refresh existing results.
 
-Requires **Windows x64**, an **NTFS drive**, and **administrator access** to read the NTFS index. Launching the app does not automatically scan a drive. No Rust, Python, Node.js, or browser installation is needed to run the downloaded application. Releases are currently unsigned; Windows may show an unknown-publisher warning.
+Requires **Windows 10/11 x64**, an **NTFS drive**, and **administrator access** to read the NTFS index. Launching the app does not automatically scan a drive. No Rust, Python, Node.js, browser, or separate Visual C++ runtime installation is needed to run the downloaded application. Releases are currently unsigned; Windows may show an unknown-publisher warning.
 
 SHA-256 checksums accompany each release. From PowerShell, `Get-FileHash .\Diskvale.exe -Algorithm SHA256` prints the executable's checksum.
 
@@ -82,12 +82,12 @@ Install [Rust through rustup](https://rustup.rs/) and [Visual Studio Build Tools
 git clone https://github.com/colin-automates/Diskvale.git
 cd Diskvale
 powershell -ExecutionPolicy Bypass -File scripts/build_release.ps1
-Copy-Item .\target\release\canopy.exe .\Diskvale.exe
+Copy-Item .\target\x86_64-pc-windows-msvc\release\canopy.exe .\Diskvale.exe
 ```
 
 `canopy` is the historical internal crate/binary name. The product, executable branding, and window title are Diskvale. The Windows SDK resource compiler embeds the app icon, version information, and administrator manifest. All application artwork is embedded in the executable.
 
-The release script runs `cargo build --release --locked` with compiler path remapping so published executables do not contain the build machine's profile or checkout paths. An ordinary local `cargo build --release --locked` also builds the application.
+The release script builds the Windows x64 target with a static C runtime and compiler path remapping. Published executables need no separate Visual C++ runtime and do not contain the build machine's profile or checkout paths. An ordinary local `cargo build --release --locked` also builds the application, but uses Cargo's default runtime linkage.
 
 Builds and ordinary tests work from a standard terminal. Launching the production app, including debug builds, requires administrator access. Use an administrator terminal for `cargo run` or CLI scans.
 

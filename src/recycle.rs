@@ -487,6 +487,7 @@ mod tests {
     #[test]
     fn both_delete_methods_reject_roots_changed_kinds_sizes_and_missing_targets() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(workspace.join("artifacts")).unwrap();
         let fixture = tempfile::Builder::new()
             .prefix("canopy-live-guard-")
             .tempdir_in(workspace.join("artifacts"))
@@ -537,6 +538,7 @@ mod tests {
     #[ignore = "Explicit permanent-delete integration on new disposable workspace fixtures only"]
     fn shell_permanently_deletes_only_new_disposable_file_and_folder_fixtures() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(workspace.join("artifacts")).unwrap();
         let fixture = tempfile::Builder::new()
             .prefix("canopy-permanent-fixture-")
             .tempdir_in(workspace.join("artifacts"))
@@ -600,6 +602,7 @@ mod tests {
     #[ignore = "Explicit disposable-fixture Recycle Bin integration test"]
     fn shell_recycles_only_new_disposable_file_and_folder_fixtures() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(workspace.join("artifacts")).unwrap();
         let resolved_workspace = workspace.canonicalize().unwrap();
         let fixture = tempfile::Builder::new()
             .prefix("canopy-recycle-fixture-")
