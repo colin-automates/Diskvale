@@ -1,5 +1,42 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{collections::HashMap, path::PathBuf};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Provenance {
+    Live,
+    #[default]
+    Snapshot,
+    Replay,
+    Incomplete,
+}
+
+/// Runtime-only authority. JSON cannot mint this capability, and clones share revocation.
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeState {
+    provenance: Provenance,
+    stale: Arc<AtomicBool>,
+}
+impl RuntimeState {
+    pub(crate) fn new(provenance: Provenance) -> Self {
+        Self {
+            provenance,
+            stale: Arc::default(),
+        }
+    }
+    pub fn provenance(&self) -> Provenance {
+        self.provenance
+    }
+    pub fn eligible(&self) -> bool {
+        self.provenance == Provenance::Live && !self.stale.load(Ordering::Acquire)
+    }
+    pub fn mark_stale(&self) {
+        self.stale.store(true, Ordering::Release);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Metric {
@@ -51,6 +88,21 @@ pub struct VolumeSpace {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
+    /// Full NTFS reference: 48-bit record number plus 16-bit sequence.
+    #[serde(default)]
+    pub reference: Option<u64>,
+    #[serde(default)]
+    pub reparse: bool,
+    /// Directory-owned $DATA display bucket; path() returns its owner, never a fabricated path.
+    #[serde(default)]
+    pub synthetic: bool,
+    #[serde(default)]
+    pub own_logical: u64,
+    #[serde(default)]
+    pub own_allocated: u64,
+    /// Named-stream logical bytes, separate from the existing unnamed file-size measure.
+    #[serde(default)]
+    pub named_logical: u64,
     pub name: String,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
@@ -66,6 +118,12 @@ pub struct Node {
 impl Node {
     pub fn new(name: String, parent: Option<usize>, directory: bool) -> Self {
         Self {
+            reference: None,
+            reparse: false,
+            synthetic: false,
+            own_logical: 0,
+            own_allocated: 0,
+            named_logical: 0,
             name,
             parent,
             directory,
@@ -88,6 +146,17 @@ impl Node {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScanStats {
+    #[serde(skip)]
+    pub runtime: RuntimeState,
+    /// FILE_ID_INFO 64-bit volume serial, sampled once per live MFT scan.
+    #[serde(default)]
+    pub volume_serial: Option<u64>,
+    /// 0 is a legacy snapshot. Version 2 adds identities and directory-stream buckets.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Legacy snapshots did not capture directory-owned streams; migration cannot recover them.
+    #[serde(default)]
+    pub directory_streams_captured: bool,
     #[serde(default)]
     pub volume_space: Option<VolumeSpace>,
     pub files: u64,
@@ -128,17 +197,33 @@ pub struct Scan {
 }
 
 impl Scan {
+    pub fn deletion_eligible(&self) -> bool {
+        self.stats.runtime.eligible()
+            && !self.stats.cancelled
+            && self.stats.errors == 0
+            && self.stats.volume_serial.is_some()
+            && self.stats.directory_streams_captured
+            && self.nodes.first().is_some_and(|n| !n.allocation_unknown)
+    }
     pub fn outside_indexed(&self) -> Option<u64> {
         let space = self.stats.volume_space.as_ref()?;
-        if self.stats.cancelled || self.nodes[0].allocation_unknown {
+        let root = self.nodes.first()?;
+        if self.stats.cancelled
+            || self.stats.errors != 0
+            || root.allocation_unknown
+            || !self.stats.directory_streams_captured
+        {
             return None;
         }
         space
             .capacity
             .checked_sub(space.free)?
-            .checked_sub(self.nodes[0].allocated)
+            .checked_sub(root.allocated)
     }
     pub fn path(&self, mut id: usize) -> PathBuf {
+        if self.nodes[id].synthetic {
+            id = self.nodes[id].parent.unwrap_or(0);
+        }
         let mut parts = vec![];
         while let Some(parent) = self.nodes[id].parent {
             parts.push(self.nodes[id].name.as_str());
@@ -206,13 +291,17 @@ impl Scan {
             if !matches(node) {
                 continue;
             }
-            let ext = std::path::Path::new(&node.name)
-                .extension()
-                .map(|x| format!(".{}", x.to_string_lossy().to_lowercase()))
-                .unwrap_or_else(|| "No extension".into());
+            let ext = if node.synthetic {
+                "Directory streams".into()
+            } else {
+                std::path::Path::new(&node.name)
+                    .extension()
+                    .map(|x| format!(".{}", x.to_string_lossy().to_lowercase()))
+                    .unwrap_or_else(|| "No extension".into())
+            };
             let entry = map.entry(ext).or_default();
             entry.0 = entry.0.saturating_add(node.size(metric));
-            entry.1 += 1;
+            entry.1 += u64::from(!node.synthetic);
         }
         let mut items: Vec<_> = map
             .into_iter()
@@ -258,6 +347,8 @@ mod tests {
             free_at_start: 110,
             captured_unix: 123,
         });
+        assert_eq!(scan.outside_indexed(), None); // Legacy/missing directory-stream accounting.
+        scan.stats.directory_streams_captured = true;
         assert_eq!(scan.outside_indexed(), Some(100));
         scan.stats.cancelled = true;
         assert_eq!(scan.outside_indexed(), None);

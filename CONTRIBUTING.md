@@ -14,6 +14,18 @@ cargo clippy --locked --all-targets -- -D warnings
 
 Use synthetic fixtures for scanner and UI tests. The normal test suite needs no administrator token and does not scan a real drive. Ignored tests include Windows Recycle Bin/permanent-deletion integration checks that create disposable fixtures, plus a saved-scan timing test. Inspect a specific ignored test before running it; do not enable all ignored tests as part of routine CI.
 
+Real Shell deletion integration additionally requires a separate explicit opt-in, `DISKVALE_DELETE_FIXTURE_TESTS=1`. Only after that opt-in, run one inspected test by its exact name:
+
+```powershell
+$env:DISKVALE_DELETE_FIXTURE_TESTS = '1'
+cargo test --locked --lib recycle::tests::shell_recycles_only_new_disposable_file_and_folder_fixtures -- --exact --ignored --nocapture
+# Permanent deletion needs its own intentional selection:
+cargo test --locked --lib recycle::tests::shell_permanently_deletes_only_new_disposable_file_and_folder_fixtures -- --exact --ignored --nocapture
+Remove-Item Env:DISKVALE_DELETE_FIXTURE_TESTS
+```
+
+These tests create unique disposable folders under this checkout's `artifacts` directory and check confinement before operation. They never empty the Recycle Bin. Normal identity, pre-operation replacement, callback-veto, staged-output failure, generation, background responsiveness, stream-accounting, and sidebar-page regressions run without this opt-in and do not call Shell deletion. See [the review validation report](docs/review-fixes-2026-10-10.md) for executed checks and measured limits.
+
 To preview the UI with demo data from a standard terminal:
 
 ```powershell

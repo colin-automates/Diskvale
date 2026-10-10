@@ -1,3 +1,4 @@
+#![cfg(not(test))]
 //! Capture only the production UI framebuffer, using a synthetic drive index.
 //! No desktop pixels, file dialogs, live scan or filesystem actions are recorded.
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, pos2, vec2};

@@ -10,6 +10,7 @@ pub(super) struct Geometry {
     pub sector: usize,
     pub cluster: u64,
     pub valid: u64,
+    pub total_clusters: Option<u64>,
 }
 impl Geometry {
     pub fn validate(self) -> Result<(), String> {
@@ -109,6 +110,7 @@ pub(super) fn saved_geometry(file: &mut File) -> Result<Geometry, String> {
         sector: size / (count - 1),
         cluster: 0,
         valid: file.metadata().map_err(|e| e.to_string())?.len(),
+        total_clusters: None,
     };
     geometry.validate()?;
     let mut raw = vec![0; size];
@@ -252,6 +254,7 @@ pub(super) fn volume_mapping(file: &mut File) -> Result<(Geometry, Vec<Run>), St
         sector: data.BytesPerSector as usize,
         cluster: data.BytesPerCluster as u64,
         valid: data.MftValidDataLength as u64,
+        total_clusters: Some(data.TotalClusters as u64),
     };
     geometry.validate()?;
     let total = data.TotalClusters as u64;

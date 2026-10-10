@@ -1,9 +1,7 @@
 //! Developer preview of the production UI from an existing saved scan.
 //! Usage: cargo run --example map_review -- --snapshot scan.json [--compact]
 //! The published application's administrator launch is unchanged.
-#[path = "../src/ui.rs"]
-#[allow(dead_code)]
-mod ui;
+use canopy::ui;
 
 struct Review {
     app: ui::Canopy,

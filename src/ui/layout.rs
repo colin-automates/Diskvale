@@ -7,6 +7,9 @@ impl Canopy {
     }
 
     pub(super) fn select(&mut self, id: usize) {
+        if self.scan.as_ref().is_none_or(|scan| id >= scan.nodes.len()) {
+            return;
+        }
         self.selected = Some(id);
         self.sync_selection();
     }
@@ -17,7 +20,12 @@ impl Canopy {
         }
         self.tree_selection = self.selected;
         if let (Some(scan), Some(id)) = (&self.scan, self.selected) {
-            let mut parent = scan.nodes[id].parent;
+            let Some(node) = scan.nodes.get(id) else {
+                self.selected = None;
+                self.tree_selection = None;
+                return;
+            };
+            let mut parent = node.parent;
             while let Some(id) = parent {
                 self.expanded.insert(id);
                 parent = scan.nodes[id].parent;
@@ -198,9 +206,9 @@ impl Canopy {
                         if let Some(path)=rfd::FileDialog::new().add_filter("Diskvale snapshot", &["json"]).pick_file() { self.load_scan(ctx.clone(),path); }
                     }
                     if let Some(scan)=self.scan.clone() {
-                        if ui.button("Save snapshot…").clicked() { ui.close(); self.save_snapshot(&scan); }
-                        if ui.button("Export CSV…").clicked() { ui.close(); self.export_csv(&scan); }
-                        if ui.button("Compare snapshot…").clicked() { ui.close(); self.load_baseline(&scan); }
+                        if ui.add_enabled(self.io_job.is_none(), egui::Button::new("Save snapshot…")).clicked() { ui.close(); self.save_snapshot(&scan, ctx); }
+                        if ui.add_enabled(self.io_job.is_none(), egui::Button::new("Export CSV…")).clicked() { ui.close(); self.export_csv(&scan, ctx); }
+                        if ui.add_enabled(self.io_job.is_none(), egui::Button::new("Compare snapshot…")).clicked() { ui.close(); self.load_baseline(&scan, ctx); }
                     }
                     ui.separator();
                     if ui.button("Compact window").clicked() {ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(1050.0,700.0)));ui.close();}
@@ -314,10 +322,12 @@ impl Canopy {
                             .filter(|child|self.show_zero_entries || scan.nodes[*child].size(self.metric)>0 || selected_path.contains(child)).collect();
                         children.sort_unstable_by_key(|&id|std::cmp::Reverse(scan.nodes[id].size(self.metric)));
                         let total=children.len();
-                        let mut visible:Vec<_>=children.iter().take(TREE_FANOUT).copied().collect();
-                        for id in children.into_iter().skip(TREE_FANOUT).filter(|id|selected_path.contains(id)) { visible.push(id); }
+                        let page=*self.tree_pages.get(&id).unwrap_or(&0);
+                        let start=page.saturating_mul(TREE_FANOUT).min(total.saturating_sub(1));
+                        let mut visible:Vec<_>=children.iter().skip(start).take(TREE_FANOUT).copied().collect();
+                        for child in children.iter().copied().filter(|child|selected_path.contains(child)) { if !visible.contains(&child) { visible.push(child); } }
                         // Pushed first so it pops last, after every visible child and its subtree.
-                        if total>visible.len() { stack.push(TreeRow::More{parent:id,depth:depth+1,hidden:total-visible.len()}); }
+                        if total>visible.len() { stack.push(TreeRow::More{parent:id,depth:depth+1,hidden:total-visible.len(),next_page:if (page+1)*TREE_FANOUT>=total {0} else {page+1}}); }
                         stack.extend(visible.into_iter().rev().map(|child|TreeRow::Entry{id:child,depth:depth+1}));
                     }
                 }
@@ -338,16 +348,15 @@ impl Canopy {
                     for index in range {
                         let (id,depth)=match rows[index] {
                             TreeRow::Entry{id,depth}=>(id,depth),
-                            TreeRow::More{parent,depth,hidden}=>{
+                            TreeRow::More{parent,depth,hidden,next_page}=>{
                                 let (rect,response)=ui.allocate_exact_size(vec2(ui.available_width(),row_height-2.0),Sense::click());
                                 if response.hovered() {ui.painter().rect_filled(rect,3,RAISED);}
                                 ui.painter().text(egui::pos2(rect.left()+21.0+tree_indent(depth.saturating_sub(1)),rect.center().y),Align2::LEFT_CENTER,format!("… {} more",count(hidden as u64)),FontId::proportional(12.0),MUTED);
                                 if response.clicked() {
-                                    self.navigate(parent);
-                                    self.view=View::Largest;
-                                    self.dirty=true;
+                                    self.tree_pages.insert(parent,next_page);
+                                    self.tree_dirty=true;
                                 }
-                                response.on_hover_text(format!("The sidebar lists the {TREE_FANOUT} largest entries of a folder. Click to browse the remaining entries in Files."));
+                                response.on_hover_text(format!("Show the next page of up to {TREE_FANOUT} direct children, including empty folders. The last page cycles to the first."));
                                 continue;
                             }
                         };
@@ -831,6 +840,16 @@ impl Canopy {
             && self.receiver.is_none()
             && self.deletion.is_none()
             && self.delete_pending.is_none();
+        let enabled = enabled
+            && scan.deletion_eligible()
+            && self
+                .scan
+                .as_ref()
+                .is_some_and(|s| std::ptr::eq(s.as_ref(), scan))
+            && scan
+                .nodes
+                .get(id)
+                .is_some_and(|n| !n.synthetic && n.reference.is_some() && !n.reparse);
         let response = ui.add_enabled(
             enabled,
             egui::Button::new(RichText::new("Delete…").color(AMBER)),
@@ -839,9 +858,9 @@ impl Canopy {
             response.on_disabled_hover_text("Drive and scan roots cannot be deleted")
         } else if grouped {
             response.on_disabled_hover_text("Zoom in to choose an individual file or folder")
-        } else if self.scan_stale {
+        } else if !scan.deletion_eligible() || self.scan_stale {
             response.on_disabled_hover_text(
-                "Rescan to refresh the results before deleting another item",
+                "Requires a fresh complete live scan with verified NTFS identities. Rescan the drive.",
             )
         } else {
             response.on_hover_text("Confirm the exact path, then move it to the Recycle Bin")
@@ -850,7 +869,8 @@ impl Canopy {
             match recycle::Target::from_scan(scan, id) {
                 Ok(target) => {
                     self.delete_pending =
-                        Some(DeleteConfirmation::new(target, recycle::Method::RecycleBin))
+                        Some(DeleteConfirmation::new(target, recycle::Method::RecycleBin));
+                    self.delete_pending.as_mut().unwrap().generation = self.generation;
                 }
                 Err(error) => self.scan_error = Some(error),
             }
@@ -877,6 +897,10 @@ impl Canopy {
         let Some(confirmation) = self.delete_pending.clone() else {
             return;
         };
+        if confirmation.generation != self.generation {
+            self.delete_pending = None;
+            return;
+        }
         let target = &confirmation.target;
         let permanent = confirmation.method == recycle::Method::Permanent;
         // Distinct modal IDs keep the first dialog's focus out of the second.
@@ -923,6 +947,7 @@ impl Canopy {
             self.scan_stale = true;
             let (sender, receiver) = mpsc::channel();
             self.deletion = Some(DeleteJob {
+                generation: self.generation,
                 target: target.clone(),
                 method: confirmation.method,
                 receiver,
@@ -1382,6 +1407,11 @@ impl Canopy {
 
     fn status(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status").exact_height(36.0).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(12,5))).show(ctx,|ui| {ui.horizontal(|ui| {
+            if let Some(job)=&self.io_job {
+                ui.spinner(); ui.label(format!("{} · {} bytes",job.label,count(job.progress.metadata_bytes.load(Ordering::Relaxed))));
+                if ui.add_enabled(!job.progress.cancelled(), egui::Button::new("Cancel job")).clicked() { job.progress.cancel.store(true,Ordering::Relaxed); }
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
             if self.scan_stale {ui.label(RichText::new("Out of date · Rescan").color(AMBER));}
             if self.receiver.is_some() {
                 ui.spinner();let phase=self.progress.phase.load(Ordering::Relaxed);
@@ -1412,6 +1442,10 @@ impl Canopy {
 
     pub(super) fn render(&mut self, ctx: &egui::Context) {
         self.poll();
+        if self.close_popups {
+            egui::Popup::close_all(ctx);
+            self.close_popups = false;
+        }
         // Warm the first file list while the map is visible, using the same
         // keyed cache the Files view will read. This does not copy the scan.
         if self.prefetch_results && self.scan.is_some() {
@@ -2021,6 +2055,270 @@ fn relaunch_admin() -> Result<(), String> {
 mod tests {
     use super::*;
     use canopy::model::{Node, ScanStats, VolumeSpace};
+    #[test]
+    fn accepting_replacement_scan_before_arrow_input_clears_all_old_actions() {
+        for same_length in [false, true] {
+            let ctx = egui::Context::default();
+            configure_ui(&ctx);
+            let size = vec2(1050.0, 700.0);
+            let mut app = app(Some(fixture()));
+            settle(&ctx, &mut app, size);
+            assert!(app.map_cache.iter().any(|t| t.id == 7));
+            app.map_menu = Some(7);
+            egui::Popup::open_id(&ctx, egui::Id::new("old-map-popup"));
+            assert!(egui::Popup::is_any_open(&ctx));
+            app.selected = None;
+            let mut replacement = if same_length {
+                fixture()
+            } else {
+                Scan {
+                    root: "C:\\".into(),
+                    nodes: vec![Node::new("root".into(), None, true)],
+                    stats: Default::default(),
+                }
+            };
+            if same_length {
+                replacement.nodes[7].name = "different-file.bin".into();
+            }
+            let (sender, receiver) = mpsc::channel();
+            app.receiver = Some(receiver);
+            sender.send((app.scan_request, Ok(replacement))).unwrap();
+            let _ = ctx.run(
+                frame_input(
+                    size,
+                    vec![egui::Event::Key {
+                        key: egui::Key::ArrowRight,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                ),
+                |ctx| app.render(ctx),
+            );
+            assert!(
+                app.selected.is_none(),
+                "Old map selected an unrelated replacement node"
+            );
+            assert!(app.map_menu.is_none());
+            assert!(!egui::Popup::is_any_open(&ctx));
+            assert!(app.delete_pending.is_none());
+            assert_eq!(app.generation, 1);
+        }
+    }
+    #[test]
+    fn late_old_scan_request_and_retained_confirmation_are_harmless() {
+        let mut app = app(Some(fixture()));
+        let target = recycle::Target::from_scan(app.scan.as_ref().unwrap(), 5).unwrap();
+        app.delete_pending = Some(DeleteConfirmation::new(target, recycle::Method::RecycleBin));
+        app.install_scan(fixture());
+        let installed = app.scan.clone().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        app.receiver = Some(receiver);
+        app.scan_request = 2;
+        sender.send((1, Ok(fixture()))).unwrap();
+        app.poll();
+        assert!(Arc::ptr_eq(app.scan.as_ref().unwrap(), &installed));
+        assert!(app.delete_pending.is_none());
+        assert_eq!(app.generation, 1);
+    }
+    #[test]
+    fn blocked_io_worker_leaves_frames_and_navigation_responsive_and_discards_old_comparison() {
+        let ctx = egui::Context::default();
+        configure_ui(&ctx);
+        let mut app = app(Some(fixture()));
+        let size = vec2(1050.0, 700.0);
+        let (started, startup) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        app.start_io(&ctx, "Blocked comparison", move |progress| {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+            assert!(progress.cancelled());
+            Ok(IoResult::Baseline(Arc::new(fixture()), HashMap::new()))
+        });
+        startup.recv_timeout(Duration::from_secs(2)).unwrap();
+        let start = Instant::now();
+        for _ in 0..20 {
+            let _ = ctx.run(frame_input(size, vec![]), |ctx| app.render(ctx));
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Blocked writer blocked UI frames: {elapsed:?}"
+        );
+        click_label(&ctx, &mut app, size, "Files");
+        assert!(app.view == View::Largest);
+        app.start_io(&ctx, "Unbounded second job", |_| {
+            panic!("Second job started")
+        });
+        app.install_scan(fixture());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.io_job.is_some() {
+            app.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(app.baseline.is_none());
+        assert!(app.message.contains("discarded"));
+        eprintln!("Responsiveness: 20 egui frames with blocked IO writer: {elapsed:?}");
+    }
+    #[test]
+    fn io_cancel_error_disconnect_and_old_export_are_reported() {
+        let ctx = egui::Context::default();
+        let mut app = app(Some(fixture()));
+        for cancelled in [false, true] {
+            let (sender, receiver) = mpsc::channel();
+            let progress = Arc::new(Progress::default());
+            progress.cancel.store(cancelled, Ordering::Relaxed);
+            app.io_job = Some(IoJob {
+                generation: 0,
+                label: "fixture",
+                progress,
+                receiver,
+            });
+            if cancelled {
+                sender.send(Err("cancelled fixture".into())).unwrap();
+            } else {
+                drop(sender);
+            }
+            app.poll();
+            assert!(app.io_job.is_none());
+            assert!(app.message.contains(if cancelled {
+                "cancelled"
+            } else {
+                "disconnected"
+            }));
+        }
+        let (sender, receiver) = mpsc::channel();
+        app.io_job = Some(IoJob {
+            generation: 0,
+            label: "fixture",
+            progress: Arc::default(),
+            receiver,
+        });
+        app.install_scan(fixture());
+        sender
+            .send(Ok(IoResult::Exported("fixture.csv".into())))
+            .unwrap();
+        app.poll();
+        assert!(app.message.contains("previous scan"));
+        app.start_io(&ctx, "Injected error", |_| Err("fixture failure".into()));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.io_job.is_some() {
+            app.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(app.message.contains("fixture failure"));
+    }
+    #[test]
+    fn large_generated_snapshot_job_shares_scan_and_validates_off_thread() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("large.json");
+        let mut scan = Scan {
+            root: "C:\\".into(),
+            stats: Default::default(),
+            nodes: vec![Node::new("root".into(), None, true)],
+        };
+        for i in 0..20_000 {
+            let mut node = Node::new(format!("generated-{i:05}.dat"), Some(0), false);
+            node.logical = 100;
+            node.allocated = 4096;
+            scan.nodes.push(node);
+            scan.nodes[0].children.push(i + 1);
+        }
+        scan.finish();
+        let mut app = app(Some(scan));
+        let shared = app.scan.clone().unwrap();
+        let ctx = egui::Context::default();
+        let expected = shared.clone();
+        let output = path.clone();
+        app.start_io(&ctx, "Large snapshot", move |progress| {
+            assert!(Arc::ptr_eq(&shared, &expected));
+            canopy::output::snapshot(&shared, &output, &progress)?;
+            let loaded = read_snapshot(&output, progress)?;
+            assert_eq!(loaded.nodes.len(), 20_001);
+            assert_eq!(loaded.stats.schema_version, 2);
+            assert!(!loaded.deletion_eligible());
+            Ok(IoResult::Saved(output))
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while app.io_job.is_some() {
+            app.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(app.message.contains("saved"), "{}", app.message);
+        assert!(path.metadata().unwrap().len() > 1_000_000);
+    }
+    #[test]
+    fn every_empty_overflow_directory_is_reachable_in_bounded_pages() {
+        for count in [300usize, 620] {
+            let mut scan = Scan {
+                root: "C:\\".into(),
+                stats: Default::default(),
+                nodes: vec![Node::new("root".into(), None, true)],
+            };
+            for i in 0..count {
+                let id = scan.nodes.len();
+                scan.nodes
+                    .push(Node::new(format!("folder-{i:03}"), Some(0), true));
+                scan.nodes[0].children.push(id);
+            }
+            let ctx = egui::Context::default();
+            configure_ui(&ctx);
+            let size = vec2(1050.0, 700.0);
+            let mut app = app(Some(scan));
+            app.selected = None;
+            app.show_zero_entries = true;
+            let mut seen = HashSet::new();
+            for _ in 0..count.div_ceil(TREE_FANOUT) {
+                app.tree_dirty = true;
+                settle(&ctx, &mut app, size);
+                let ids: Vec<_> = app
+                    .tree_rows
+                    .iter()
+                    .filter_map(|r| {
+                        if let TreeRow::Entry { id, .. } = r {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert!(ids.len() <= TREE_FANOUT);
+                let next_page = app
+                    .tree_rows
+                    .iter()
+                    .find_map(|row| match row {
+                        TreeRow::More { next_page, .. } => Some(*next_page),
+                        _ => None,
+                    })
+                    .unwrap();
+                for id in ids {
+                    seen.insert(id);
+                    app.navigate(id);
+                    assert_eq!(app.current, id);
+                    app.navigate(0);
+                }
+                // Exercise the page value supplied by the real More action.
+                app.tree_pages.insert(0, next_page);
+            }
+            assert_eq!(app.tree_pages[&0], 0);
+            assert_eq!(seen.len(), count);
+            app.select(count);
+            app.tree_pages.insert(0, 0);
+            app.tree_dirty = true;
+            settle(&ctx, &mut app, size);
+            assert!(
+                app.tree_rows
+                    .iter()
+                    .any(|r| matches!(r, TreeRow::Entry { id, .. } if *id==count))
+            );
+            assert!(app.tree_rows.len() <= TREE_FANOUT + 2);
+        }
+    }
     fn fixture() -> Scan {
         let mut scan = Scan {
             root: "C:\\".into(),
@@ -2058,10 +2356,22 @@ mod tests {
             scan.nodes[id].logical = (size + 1) << 30;
         }
         scan.finish();
+        scan.stats.runtime = crate::model::RuntimeState::new(crate::model::Provenance::Live);
+        scan.stats.directory_streams_captured = true;
+        scan.stats.volume_serial = Some(123);
+        for (i, node) in scan.nodes.iter_mut().enumerate() {
+            node.reference = Some((1 << 48) | i as u64);
+        }
         scan
     }
     fn app(scan: Option<Scan>) -> Canopy {
         Canopy {
+            io_job: None,
+            generation: 0,
+            scan_request: 0,
+            receiver_request: 0,
+            close_popups: false,
+            tree_pages: HashMap::new(),
             path: "C:\\".into(),
             scan: scan.map(Arc::new),
             current: 0,
@@ -3208,6 +3518,7 @@ mod tests {
         let target = recycle::Target::from_scan(app.scan.as_ref().unwrap(), 5).unwrap();
         let (sender, receiver) = mpsc::channel();
         app.deletion = Some(DeleteJob {
+            generation: app.generation,
             target,
             method,
             receiver,
@@ -3230,6 +3541,10 @@ mod tests {
             assert_eq!(app.scan.as_ref().unwrap().nodes[0].allocated, before);
             assert!(app.deletion.is_none());
             assert!(app.delete_pending.is_none());
+            Arc::get_mut(app.scan.as_mut().unwrap())
+                .unwrap()
+                .stats
+                .runtime = crate::model::RuntimeState::new(crate::model::Provenance::Live);
             completed_delete(
                 &mut app,
                 method,
@@ -3264,7 +3579,7 @@ mod tests {
         assert_eq!(pending.method, recycle::Method::Permanent);
         assert!(pending.focus_cancel);
         assert!(app.deletion.is_none());
-        assert!(app.scan_stale);
+        assert!(!app.scan_stale);
         assert!(app.scan_error.is_none());
     }
     #[test]
@@ -3367,6 +3682,14 @@ mod tests {
             ],
             stats: ScanStats::default(),
         };
+        scan.stats.runtime = crate::model::RuntimeState::new(crate::model::Provenance::Live);
+        for id in 0..scan.nodes.len() {
+            let handle = scanner::windows::identity_handle(&scan.path(id), true).unwrap();
+            let (volume, reference) = scanner::windows::handle_identity(&handle).unwrap();
+            scan.stats.directory_streams_captured = true;
+            scan.stats.volume_serial = Some(volume);
+            scan.nodes[id].reference = Some(reference);
+        }
         scan.nodes[1].logical = 6;
         scan.nodes[0].children = vec![1];
         scan.finish();
@@ -3410,6 +3733,7 @@ mod tests {
         let target = recycle::Target::from_scan(app.scan.as_ref().unwrap(), 5).unwrap();
         let (sender, receiver) = mpsc::channel();
         app.deletion = Some(DeleteJob {
+            generation: app.generation,
             target,
             method: recycle::Method::RecycleBin,
             receiver,
@@ -3575,7 +3899,7 @@ mod tests {
         replacement.finish();
         let (sender, receiver) = mpsc::channel();
         app.receiver = Some(receiver);
-        sender.send(Ok(replacement)).unwrap();
+        sender.send((app.scan_request, Ok(replacement))).unwrap();
         settle(&ctx, &mut app, size);
         assert_eq!(&*app.rows, &[7, 6, 5]);
         assert_eq!(

@@ -15,7 +15,7 @@ use std::{
 };
 
 #[path = "ui/brand.rs"]
-pub(crate) mod brand;
+pub mod brand;
 
 const BG: Color32 = Color32::from_rgb(17, 22, 27);
 const PANEL: Color32 = Color32::from_rgb(23, 29, 35);
@@ -46,6 +46,7 @@ enum TreeRow {
         parent: usize,
         depth: usize,
         hidden: usize,
+        next_page: usize,
     },
 }
 
@@ -54,6 +55,7 @@ struct DeleteConfirmation {
     target: recycle::Target,
     method: recycle::Method,
     focus_cancel: bool,
+    generation: u64,
 }
 
 impl DeleteConfirmation {
@@ -62,17 +64,37 @@ impl DeleteConfirmation {
             target,
             method,
             focus_cancel: true,
+            generation: 0,
         }
     }
 }
 
 struct DeleteJob {
+    generation: u64,
     target: recycle::Target,
     method: recycle::Method,
     receiver: mpsc::Receiver<Result<recycle::Outcome, String>>,
 }
 
+enum IoResult {
+    Saved(PathBuf),
+    Exported(PathBuf),
+    Baseline(Arc<Scan>, HashMap<String, (u64, u64)>),
+}
+struct IoJob {
+    generation: u64,
+    label: &'static str,
+    progress: Arc<Progress>,
+    receiver: mpsc::Receiver<Result<IoResult, String>>,
+}
+
 pub struct Canopy {
+    io_job: Option<IoJob>,
+    generation: u64,
+    scan_request: u64,
+    receiver_request: u64,
+    close_popups: bool,
+    tree_pages: HashMap<usize, usize>,
     path: String,
     scan: Option<Arc<Scan>>,
     current: usize,
@@ -87,7 +109,7 @@ pub struct Canopy {
     prefetch_results: bool,
     descending: bool,
     progress: Arc<Progress>,
-    receiver: Option<mpsc::Receiver<Result<Scan, String>>>,
+    receiver: Option<mpsc::Receiver<(u64, Result<Scan, String>)>>,
     started: Instant,
     message: String,
     scan_error: Option<String>,
@@ -152,6 +174,12 @@ impl Canopy {
                 "C:\\".into()
             });
         let mut app = Self {
+            io_job: None,
+            generation: 0,
+            scan_request: 0,
+            receiver_request: 0,
+            close_popups: false,
+            tree_pages: HashMap::new(),
             path,
             scan: None,
             current: 0,
@@ -235,7 +263,7 @@ impl Canopy {
         app
     }
     fn load_scan(&mut self, ctx: egui::Context, path: PathBuf) {
-        if self.deletion.is_some() || self.delete_pending.is_some() {
+        if self.receiver.is_some() || self.deletion.is_some() || self.delete_pending.is_some() {
             return;
         }
         self.scan_error = None;
@@ -243,24 +271,18 @@ impl Canopy {
         self.progress.phase.store(3, Ordering::Relaxed);
         self.started = Instant::now();
         let (sender, receiver) = mpsc::channel();
+        if let Some(scan) = &self.scan {
+            scan.stats.runtime.mark_stale();
+            self.scan_stale = true;
+        }
         self.receiver = Some(receiver);
+        self.scan_request += 1;
+        self.receiver_request = self.scan_request;
+        let request = self.scan_request;
         let progress = self.progress.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| {
-                let file = std::fs::File::open(&path)
-                    .map_err(|e| format!("Could not open snapshot: {e}"))?;
-                let reader = CancellableReader {
-                    inner: file,
-                    progress: progress.clone(),
-                };
-                let mut scan: Scan = serde_json::from_reader(std::io::BufReader::new(reader))
-                    .map_err(|e| format!("Could not read snapshot: {e}"))?;
-                if !valid_snapshot(&scan) {
-                    return Err("Invalid snapshot tree.".into());
-                }
-                if progress.cancelled() {
-                    return Err("Snapshot loading cancelled.".into());
-                }
+                let mut scan = read_snapshot(&path, progress.clone())?;
                 scan.stats.notices.insert(
                     0,
                     "Loaded a saved scan. The counts and scan time refer to that captured run."
@@ -269,7 +291,7 @@ impl Canopy {
                 Ok(scan)
             })
             .unwrap_or_else(|_| Err("Could not load snapshot.".into()));
-            let _ = sender.send(result);
+            let _ = sender.send((request, result));
             ctx.request_repaint();
         });
     }
@@ -292,17 +314,70 @@ impl Canopy {
         let progress = self.progress.clone();
         let mft_file = self.mft_file.clone();
         let (sender, receiver) = mpsc::channel();
+        if let Some(scan) = &self.scan {
+            scan.stats.runtime.mark_stale();
+            self.scan_stale = true;
+        }
         self.receiver = Some(receiver);
+        self.scan_request += 1;
+        self.receiver_request = self.scan_request;
+        let request = self.scan_request;
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| run_ui_scan(root, progress, mft_file))
                 .unwrap_or_else(|_| {
                     Err("The scanner stopped unexpectedly. Please rescan the NTFS drive.".into())
                 });
-            let _ = sender.send(result);
+            let _ = sender.send((request, result));
             ctx.request_repaint();
         });
     }
     fn poll(&mut self) {
+        if let Some(outcome) = self
+            .io_job
+            .as_ref()
+            .and_then(|job| match job.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "Background output/comparison worker disconnected.".into(),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            })
+        {
+            let job = self.io_job.take().unwrap();
+            self.message = match outcome {
+                Ok(IoResult::Saved(path)) => format!(
+                    "Snapshot from scan #{} saved to {}{}",
+                    job.generation,
+                    path.display(),
+                    if job.generation != self.generation {
+                        " (previous scan)"
+                    } else {
+                        ""
+                    }
+                ),
+                Ok(IoResult::Exported(path)) => format!(
+                    "Export from scan #{} saved to {}{}",
+                    job.generation,
+                    path.display(),
+                    if job.generation != self.generation {
+                        " (previous scan)"
+                    } else {
+                        ""
+                    }
+                ),
+                Ok(IoResult::Baseline(old, map))
+                    if job.generation == self.generation && !job.progress.cancelled() =>
+                {
+                    self.baseline = Some(old);
+                    self.baseline_map = map;
+                    "Comparison loaded. Change values use the selected size metric.".into()
+                }
+                Ok(IoResult::Baseline(_, _)) => {
+                    "Comparison discarded because its scan changed or it was cancelled.".into()
+                }
+                Err(error) => format!("{}: {error}", job.label),
+            };
+        }
         self.rows_cache.poll();
         self.extensions_cache.poll();
         let deleted = self
@@ -317,7 +392,19 @@ impl Canopy {
             });
         if let Some(result) = deleted {
             let job = self.deletion.take().unwrap();
+            if job.generation != self.generation {
+                return;
+            }
             self.scan_stale = true;
+            // A recycle-only veto performed no mutation. Keep the exact target
+            // eligible for the existing separately confirmed permanent action.
+            if result != Ok(recycle::Outcome::CannotRecycle) {
+                if let Some(scan) = &self.scan {
+                    scan.stats.runtime.mark_stale();
+                }
+            } else {
+                self.scan_stale = false;
+            }
             match result {
                 Ok(recycle::Outcome::Deleted) => {
                     self.scan_error = None;
@@ -341,6 +428,7 @@ impl Canopy {
                         job.target,
                         recycle::Method::Permanent,
                     ));
+                    self.delete_pending.as_mut().unwrap().generation = self.generation;
                 }
                 Ok(recycle::Outcome::CannotRecycle) => {
                     self.scan_error = Some("Windows did not finish deleting this item. Rescan to check the current files.".into());
@@ -350,60 +438,78 @@ impl Canopy {
         }
         let outcome = self.receiver.as_ref().and_then(|r| match r.try_recv() {
             Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Disconnected) => Some(Err("Scanner disconnected.".into())),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some((self.receiver_request, Err("Scanner disconnected.".into())))
+            }
             _ => None,
         });
-        if let Some(outcome) = outcome {
+        if let Some((request, outcome)) = outcome {
             self.receiver = None;
+            if request != self.scan_request {
+                return;
+            }
             match outcome {
                 Ok(scan) => {
-                    self.path = scan.root.display().to_string();
-                    self.current = 0;
-                    self.selected = None;
-                    if let Some(folder) = self.initial_focus.take() {
-                        if let Some(id) = focus_entry(&scan, &folder) {
-                            if scan.nodes[id].directory {
-                                self.current = id;
-                            } else {
-                                self.current = scan.nodes[id].parent.unwrap_or(0);
-                                self.selected = Some(id);
-                            }
-                        } else {
-                            self.message = format!("Folder not found in this scan: {folder}");
-                        }
-                    }
-                    self.scan = Some(Arc::new(scan));
-                    self.scan_stale = false;
-                    self.delete_pending = None;
-                    self.loaded_at = Some(Instant::now());
-                    self.expanded = HashSet::from([0]);
-                    self.tree_dirty = true;
-                    self.tree_selection = None;
-                    self.rows_cache = results::ResultCache::default();
-                    self.extensions_cache = results::ResultCache::default();
-                    self.prefetch_results = true;
-                    self.rows = vec![].into();
-                    self.types_cache = vec![].into();
-                    self.weights = None;
-                    self.matching_files = None;
-                    self.filter_key = None;
-                    self.filter_receiver = None;
-                    self.filtering_key = None;
-                    self.dirty = true;
-                    self.map_key = None;
-                    self.types_key = None;
-                    if self
-                        .baseline
-                        .as_ref()
-                        .is_some_and(|b| self.scan.as_ref().is_some_and(|s| b.root != s.root))
-                    {
-                        self.baseline = None;
-                        self.baseline_map.clear();
-                    }
+                    self.install_scan(scan);
                 }
                 Err(error) => self.scan_error = Some(error),
             }
         }
+    }
+
+    fn install_scan(&mut self, scan: Scan) {
+        if let Some(job) = &self.io_job {
+            job.progress.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(old) = &self.scan {
+            old.stats.runtime.mark_stale();
+        }
+        self.generation += 1;
+        self.close_popups = true;
+        self.map_cache.clear();
+        self.map_shapes.clear();
+        self.map_menu = None;
+        self.map_menu_is_group = false;
+        self.tree_rows.clear();
+        self.tree_pages.clear();
+        self.scroll_selection = false;
+        self.baseline = None;
+        self.baseline_map.clear();
+        self.path = scan.root.display().to_string();
+        self.current = 0;
+        self.selected = None;
+        if let Some(folder) = self.initial_focus.take() {
+            if let Some(id) = focus_entry(&scan, &folder) {
+                if scan.nodes[id].directory {
+                    self.current = id;
+                } else {
+                    self.current = scan.nodes[id].parent.unwrap_or(0);
+                    self.selected = Some(id);
+                }
+            } else {
+                self.message = format!("Folder not found in this scan: {folder}");
+            }
+        }
+        self.scan = Some(Arc::new(scan));
+        self.scan_stale = false;
+        self.delete_pending = None;
+        self.loaded_at = Some(Instant::now());
+        self.expanded = HashSet::from([0]);
+        self.tree_dirty = true;
+        self.tree_selection = None;
+        self.rows_cache = results::ResultCache::default();
+        self.extensions_cache = results::ResultCache::default();
+        self.prefetch_results = true;
+        self.rows = vec![].into();
+        self.types_cache = vec![].into();
+        self.weights = None;
+        self.matching_files = None;
+        self.filter_key = None;
+        self.filter_receiver = None;
+        self.filtering_key = None;
+        self.dirty = true;
+        self.map_key = None;
+        self.types_key = None;
     }
     fn navigate(&mut self, id: usize) {
         self.current = id;
@@ -477,7 +583,7 @@ impl Canopy {
         self.baseline.as_ref()?;
         let old = self
             .baseline_map
-            .get(&scan.relative_path(id))
+            .get(&comparison_key(scan, id))
             .copied()
             .unwrap_or_default();
         let old = match self.metric {
@@ -817,60 +923,90 @@ impl Canopy {
             });
     }
 
-    fn save_snapshot(&mut self, scan: &Scan) {
+    fn start_io(
+        &mut self,
+        ctx: &egui::Context,
+        label: &'static str,
+        work: impl FnOnce(Arc<Progress>) -> Result<IoResult, String> + Send + 'static,
+    ) {
+        if self.io_job.is_some() {
+            return;
+        }
+        let progress = Arc::new(Progress::default());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.io_job = Some(IoJob {
+            generation: self.generation,
+            label,
+            progress: progress.clone(),
+            receiver,
+        });
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(progress)))
+                .unwrap_or_else(|_| Err("Background worker stopped unexpectedly.".into()));
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+    }
+    fn save_snapshot(&mut self, scan: &Arc<Scan>, ctx: &egui::Context) {
+        if self.io_job.is_some() {
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Diskvale snapshot", &["json"])
             .set_file_name("diskvale-snapshot.json")
             .save_file()
         {
-            self.message = match write_snapshot(scan, &path) {
-                Ok(_) => format!("Snapshot saved to {}", path.display()),
-                Err(e) => format!("Could not save snapshot: {e}"),
-            };
+            let scan = scan.clone();
+            self.start_io(ctx, "Saving snapshot", move |progress| {
+                canopy::output::snapshot(&scan, &path, &progress)?;
+                Ok(IoResult::Saved(path))
+            });
         }
     }
-    fn load_baseline(&mut self, scan: &Scan) {
+    fn load_baseline(&mut self, scan: &Arc<Scan>, ctx: &egui::Context) {
+        if self.io_job.is_some() {
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Diskvale snapshot", &["json"])
             .pick_file()
         {
-            let loaded = std::fs::File::open(path)
-                .map_err(|e| e.to_string())
-                .and_then(|f| {
-                    serde_json::from_reader::<_, Scan>(std::io::BufReader::new(f))
-                        .map_err(|e| e.to_string())
-                });
-            match loaded {
-                Ok(old) if old.root == scan.root && valid_snapshot(&old) => {
-                    self.baseline_map = (0..old.nodes.len())
-                        .map(|i| {
-                            (
-                                old.relative_path(i),
-                                (old.nodes[i].logical, old.nodes[i].allocated),
-                            )
-                        })
-                        .collect();
-                    self.baseline = Some(Arc::new(old));
-                    self.message =
-                        "Comparison loaded. Change values use the selected size metric.".into();
+            let scan = scan.clone();
+            self.start_io(ctx, "Loading comparison", move |progress| {
+                let old = read_snapshot(&path, progress.clone())?;
+                if old.root != scan.root {
+                    return Err("Choose a snapshot of the same drive.".into());
                 }
-                Ok(_) => {
-                    self.message = "Choose a valid snapshot of the same folder or drive.".into()
+                if old.stats.directory_streams_captured != scan.stats.directory_streams_captured {
+                    return Err("Snapshot accounting differs: legacy captures omit directory streams. Compare captures with the same accounting profile or rescan.".into());
                 }
-                Err(e) => self.message = format!("Could not load snapshot: {e}"),
-            }
+                let mut map = HashMap::with_capacity(old.nodes.len());
+                for (id, node) in old.nodes.iter().enumerate() {
+                    if progress.cancelled() {
+                        return Err("Comparison cancelled.".into());
+                    }
+                    map.insert(comparison_key(&old, id), (node.logical, node.allocated));
+                    progress.files.store(id as u64 + 1, Ordering::Relaxed);
+                }
+                Ok(IoResult::Baseline(Arc::new(old), map))
+            });
         }
     }
-    fn export_csv(&mut self, scan: &Scan) {
+    fn export_csv(&mut self, scan: &Arc<Scan>, ctx: &egui::Context) {
+        if self.io_job.is_some() {
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("CSV", &["csv"])
             .set_file_name("diskvale-files.csv")
             .save_file()
         {
-            self.message = match write_csv(scan, &path) {
-                Ok(_) => format!("Export saved to {}", path.display()),
-                Err(e) => format!("Could not export: {e}"),
-            };
+            let scan = scan.clone();
+            self.start_io(ctx, "Exporting CSV", move |progress| {
+                canopy::output::csv(&scan, &path, &progress)?;
+                Ok(IoResult::Exported(path))
+            });
         }
     }
 }
@@ -887,6 +1023,9 @@ impl eframe::App for Canopy {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.progress.cancel.store(true, Ordering::Relaxed);
+        if let Some(job) = &self.io_job {
+            job.progress.cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 fn configure_ui(ctx: &egui::Context) {
@@ -932,10 +1071,7 @@ impl<R: std::io::Read> std::io::Read for CancellableReader<R> {
 }
 
 fn is_saved_scan(scan: &Scan) -> bool {
-    scan.stats
-        .notices
-        .iter()
-        .any(|notice| notice.starts_with("Loaded a saved scan."))
+    scan.stats.runtime.provenance() == canopy::model::Provenance::Snapshot
 }
 
 // Launch directly into a folder of a captured or newly completed scan.
@@ -1035,7 +1171,11 @@ fn run_ui_scan(
 }
 
 fn valid_snapshot(scan: &Scan) -> bool {
-    if scan.nodes.is_empty() || scan.nodes[0].parent.is_some() {
+    if scan.stats.schema_version > 2
+        || scan.nodes.is_empty()
+        || scan.nodes[0].parent.is_some()
+        || !scan.nodes[0].directory
+    {
         return false;
     }
     let mut seen = vec![false; scan.nodes.len()];
@@ -1045,51 +1185,151 @@ fn valid_snapshot(scan: &Scan) -> bool {
             return false;
         }
         seen[id] = true;
+        let node = &scan.nodes[id];
+        if (!node.directory && !node.children.is_empty())
+            || (id != 0 && !recycle::safe_name(&node.name))
+            || (node.synthetic
+                && (node.directory
+                    || node.reference.is_some()
+                    || node.files != 0
+                    || node
+                        .parent
+                        .is_none_or(|p| !scan.nodes.get(p).is_some_and(|n| n.directory))))
+        {
+            return false;
+        }
+        let mut names = HashSet::new();
         for &child in &scan.nodes[id].children {
             if child >= scan.nodes.len() || scan.nodes[child].parent != Some(id) {
+                return false;
+            }
+            if !scan.nodes[child].synthetic && !names.insert(scan.nodes[child].name.to_lowercase())
+            {
                 return false;
             }
             stack.push(child);
         }
     }
-    seen.iter().all(|s| *s)
+    if !seen.iter().all(|s| *s) {
+        return false;
+    }
+    // Check derived totals rather than trusting imported aggregate/accounting claims.
+    let mut totals = vec![(0u64, 0u64, 0u64, false); scan.nodes.len()];
+    let mut stack = vec![(0, false)];
+    while let Some((id, visited)) = stack.pop() {
+        let node = &scan.nodes[id];
+        if !visited && node.directory {
+            stack.push((id, true));
+            stack.extend(node.children.iter().map(|&c| (c, false)));
+        } else if node.directory {
+            let mut buckets = node.children.iter().filter(|&&c| scan.nodes[c].synthetic);
+            if let Some(&bucket) = buckets.next() {
+                if buckets.next().is_some()
+                    || scan.nodes[bucket].logical != node.own_logical
+                    || scan.nodes[bucket].allocated != node.own_allocated
+                {
+                    return false;
+                }
+            } else if node.own_logical != 0 || node.own_allocated != 0 {
+                return false;
+            }
+            let mut sum = (0u64, 0u64, 0u64, false);
+            for &child in &node.children {
+                let t = totals[child];
+                let (Some(a), Some(b), Some(c)) = (
+                    sum.0.checked_add(t.0),
+                    sum.1.checked_add(t.1),
+                    sum.2.checked_add(t.2),
+                ) else {
+                    return false;
+                };
+                sum = (a, b, c, sum.3 || t.3);
+            }
+            totals[id] = sum;
+            if (
+                node.logical,
+                node.allocated,
+                node.files,
+                node.allocation_unknown,
+            ) != sum
+            {
+                return false;
+            }
+            if (node.own_logical != 0 || node.own_allocated != 0)
+                && !node.children.iter().any(|&c| {
+                    scan.nodes[c].synthetic
+                        && scan.nodes[c].logical == node.own_logical
+                        && scan.nodes[c].allocated == node.own_allocated
+                })
+            {
+                return false;
+            }
+        } else {
+            if node.own_logical != 0 || node.own_allocated != 0 {
+                return false;
+            }
+            if node.files != u64::from(!node.synthetic) {
+                return false;
+            }
+            totals[id] = (
+                node.logical,
+                node.allocated,
+                node.files,
+                node.allocation_unknown,
+            );
+        }
+    }
+    true
+}
+fn comparison_key(scan: &Scan, id: usize) -> String {
+    if scan.nodes[id].synthetic {
+        format!("\0directory-streams:{}", scan.relative_path(id))
+    } else {
+        scan.relative_path(id)
+    }
+}
+fn read_snapshot(path: &std::path::Path, progress: Arc<Progress>) -> Result<Scan, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("Opening snapshot: {e}"))?;
+    let reader = CancellableReader {
+        inner: file,
+        progress: progress.clone(),
+    };
+    let mut scan: Scan = serde_json::from_reader(std::io::BufReader::new(reader))
+        .map_err(|e| format!("Reading snapshot: {e}"))?;
+    if !valid_snapshot(&scan) {
+        return Err("Invalid or unsupported snapshot accounting/tree.".into());
+    }
+    if progress.cancelled() {
+        return Err("Snapshot loading cancelled.".into());
+    }
+    scan.finish();
+    scan.stats.files = scan.nodes[0].files;
+    scan.stats.folders = scan
+        .nodes
+        .iter()
+        .filter(|n| n.directory)
+        .count()
+        .saturating_sub(1) as u64;
+    scan.stats.shared_links = scan
+        .nodes
+        .iter()
+        .filter(|n| n.shared && !n.directory && !n.synthetic)
+        .count() as u64;
+    scan.stats.unknown_allocations = scan
+        .nodes
+        .iter()
+        .filter(|n| n.allocation_unknown && !n.directory)
+        .count() as u64;
+    if !scan.stats.directory_streams_captured {
+        scan.stats.notices.insert(0, "Legacy snapshot: directory-owned data streams were not captured; missing stream accounting cannot be reconstructed from this file. Rescan for current totals.".into());
+    }
+    Ok(scan)
 }
 fn write_csv(scan: &Scan, path: &std::path::Path) -> Result<(), String> {
-    let mut writer = csv::Writer::from_path(path).map_err(|e| e.to_string())?;
-    writer
-        .write_record([
-            "path",
-            "directory",
-            "logical_bytes",
-            "allocated_bytes",
-            "shared_link",
-            "allocation_unknown",
-            "files",
-            "modified_unix_seconds",
-        ])
-        .map_err(|e| e.to_string())?;
-    for (id, node) in scan.nodes.iter().enumerate() {
-        writer
-            .write_record([
-                scan.path(id).display().to_string(),
-                node.directory.to_string(),
-                node.logical.to_string(),
-                node.allocated.to_string(),
-                node.shared.to_string(),
-                node.allocation_unknown.to_string(),
-                node.files.to_string(),
-                node.modified.to_string(),
-            ])
-            .map_err(|e| e.to_string())?;
-    }
-    writer.flush().map_err(|e| e.to_string())
+    canopy::output::csv(scan, path, &Progress::default())
 }
 fn write_snapshot(scan: &Scan, path: &std::path::Path) -> Result<(), String> {
-    use std::io::Write;
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut writer = std::io::BufWriter::new(file);
-    serde_json::to_writer(&mut writer, scan).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+    canopy::output::snapshot(scan, path, &Progress::default())
 }
 pub fn cli() {
     let args: Vec<_> = std::env::args().collect();
@@ -1105,11 +1345,17 @@ pub fn cli() {
     let result = run_ui_scan(root.into(), progress, get("--mft-file").map(PathBuf::from));
     match result {
         Ok(scan) => {
-            if let Some(path) = get("--json") {
-                write_snapshot(&scan, &PathBuf::from(path)).expect("snapshot output");
+            if let Some(path) = get("--json")
+                && let Err(error) = write_snapshot(&scan, &PathBuf::from(path))
+            {
+                eprintln!("Snapshot output {}: {error}", path);
+                std::process::exit(1);
             }
-            if let Some(path) = get("--csv") {
-                write_csv(&scan, &PathBuf::from(path)).expect("CSV output");
+            if let Some(path) = get("--csv")
+                && let Err(error) = write_csv(&scan, &PathBuf::from(path))
+            {
+                eprintln!("CSV output {}: {error}", path);
+                std::process::exit(1);
             }
             println!("{}",serde_json::to_string_pretty(&serde_json::json!({"root":scan.root,"logical_bytes":scan.nodes[0].logical,"allocated_bytes":scan.nodes[0].allocated,"stats":scan.stats})).unwrap());
         }
@@ -1122,6 +1368,79 @@ pub fn cli() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_invariants_reject_unsafe_components_overflows_and_forged_totals() {
+        use canopy::model::Node;
+        let mut scan = Scan {
+            root: "C:\\".into(),
+            stats: Default::default(),
+            nodes: vec![
+                Node::new("root".into(), None, true),
+                Node::new("leaf.bin".into(), Some(0), false),
+            ],
+        };
+        scan.nodes[0].children = vec![1];
+        scan.nodes[1].logical = 5;
+        scan.nodes[1].allocated = 4096;
+        scan.finish();
+        assert!(valid_snapshot(&scan));
+        scan.nodes[0].allocated += 1;
+        assert!(!valid_snapshot(&scan));
+        scan.finish();
+        scan.nodes[1].name = "../escape".into();
+        assert!(!valid_snapshot(&scan));
+        scan.nodes[1].name = "leaf.bin".into();
+        scan.nodes[0].children.push(99);
+        assert!(!valid_snapshot(&scan));
+        scan.nodes[0].children.pop();
+        scan.nodes
+            .push(Node::new("second.bin".into(), Some(0), false));
+        scan.nodes[0].children.push(2);
+        scan.nodes[1].allocated = u64::MAX;
+        scan.nodes[2].allocated = 1;
+        scan.finish();
+        assert!(!valid_snapshot(&scan));
+    }
+    #[test]
+    fn upgrading_legacy_snapshot_preserves_missing_accounting_and_recomputes_counts() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("legacy.json");
+        use canopy::model::Node;
+        let scan = Scan {
+            root: "C:\\".into(),
+            stats: Default::default(),
+            nodes: vec![Node::new("root".into(), None, true)],
+        };
+        canopy::output::snapshot(&scan, &path, &Progress::default()).unwrap();
+        let loaded = read_snapshot(&path, Arc::default()).unwrap();
+        assert_eq!(loaded.stats.schema_version, 2);
+        assert!(!loaded.stats.directory_streams_captured);
+        assert!(
+            loaded
+                .stats
+                .notices
+                .iter()
+                .any(|n| n.contains("cannot be reconstructed"))
+        );
+        assert!(!loaded.deletion_eligible());
+        assert_eq!(loaded.stats.files, 0);
+    }
+    #[test]
+    fn regression_import_requires_directory_root_and_leaf_files() {
+        use canopy::model::Node;
+        let mut scan = Scan {
+            root: "C:\\".into(),
+            stats: Default::default(),
+            nodes: vec![Node::new("root".into(), None, false)],
+        };
+        assert!(!valid_snapshot(&scan));
+        scan.nodes[0].directory = true;
+        scan.nodes.push(Node::new("file".into(), Some(0), false));
+        scan.nodes.push(Node::new("child".into(), Some(1), false));
+        scan.nodes[0].children = vec![1];
+        scan.nodes[1].children = vec![2];
+        assert!(!valid_snapshot(&scan));
+    }
     #[test]
     fn snapshot_cancellation_stops_reading_before_the_remainder() {
         use std::io::Read;

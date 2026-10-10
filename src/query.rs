@@ -155,7 +155,7 @@ pub fn map_totals(
             && category.is_none_or(|c| Category::from_name(&node.name) == c)
         {
             result[id] = node.size(metric);
-            files[id] = 1;
+            files[id] = u64::from(!node.synthetic);
         }
     }
     for id in order.into_iter().rev() {

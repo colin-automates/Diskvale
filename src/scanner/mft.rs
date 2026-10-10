@@ -46,8 +46,9 @@ fn read_index(
                 if format::u16_at(raw, 22).is_some_and(|flags| flags & 1 != 0) {
                     format::fixup(raw, geometry.sector, false)
                         .map_err(|e| format!("NTFS record {index}: {e}"))?;
-                    if let Some(record) = format::parse(raw, index as u64, geometry.cluster)
-                        .map_err(|e| format!("NTFS record {index}: {e}"))?
+                    if let Some(record) =
+                        format::parse(raw, index as u64, geometry.cluster, geometry.total_clusters)
+                            .map_err(|e| format!("NTFS record {index}: {e}"))?
                     {
                         if record.base != 0 {
                             extensions.push(record);
@@ -77,7 +78,8 @@ fn read_index(
     let extension_owners: std::collections::HashMap<_, _> =
         extensions.iter().map(|r| (r.reference, r.base)).collect();
     for record in &records {
-        for &reference in &record.required {
+        for entry in &record.required {
+            let reference = entry.reference;
             if !progress.cancelled()
                 && reference != record.reference
                 && extension_owners.get(&reference) != Some(&record.reference)
@@ -130,6 +132,11 @@ pub fn scan_file(root: &Path, file: &Path, progress: &Progress) -> Result<Scan, 
     let geometry = source::saved_geometry(&mut file)?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut scan = read_index(file, root, geometry, progress, "Saved NTFS MFT (read only)")?;
+    scan.stats.runtime = crate::model::RuntimeState::new(if scan.stats.cancelled {
+        crate::model::Provenance::Incomplete
+    } else {
+        crate::model::Provenance::Replay
+    });
     scan.stats.notices.insert(
         0,
         "Replayed a saved NTFS index; this is not a live scan of the displayed root.".into(),
@@ -145,9 +152,20 @@ pub fn scan_volume(root: &Path, progress: &Progress) -> Result<Scan, String> {
         return tree::build(&root, vec![], progress, "Experimental NTFS MFT");
     }
     let mut volume = super::windows::volume_file(&root).map_err(volume_access_error)?;
+    let root_handle = super::windows::identity_handle(&root, true)
+        .map_err(|e| format!("Cannot open NTFS root identity: {e}"))?;
+    let volume_serial = super::windows::handle_identity(&root_handle)
+        .map_err(|e| format!("Cannot verify NTFS volume identity: {e}"))?
+        .0;
     let (geometry, mapping) = source::volume_mapping(&mut volume)?;
     let reader = source::MappedReader::new(&mut volume, mapping, geometry.cluster, geometry.valid)?;
     let mut scan = read_index(reader, &root, geometry, progress, "Experimental NTFS MFT")?;
+    scan.stats.volume_serial = Some(volume_serial);
+    scan.stats.runtime = crate::model::RuntimeState::new(if scan.stats.cancelled {
+        crate::model::Provenance::Incomplete
+    } else {
+        crate::model::Provenance::Live
+    });
     scan.stats.elapsed_seconds = started.elapsed().as_secs_f64();
     Ok(scan)
 }

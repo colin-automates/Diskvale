@@ -181,7 +181,7 @@ pub(super) fn attribute_name(attr: &[u8]) -> Result<String, String> {
             .ok_or("Invalid stream name bounds")?,
     )
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ListEntry {
     pub typ: u32,
     pub vcn: u64,
@@ -242,9 +242,11 @@ pub(super) struct Stream {
     pub logical: u64,
     pub allocated: u64,
     pub range: Option<(u64, u64)>,
+    pub extent: u64,
 }
 #[derive(Default, Debug)]
 pub(super) struct Record {
+    pub cluster: u64,
     pub reference: u64,
     pub base: u64,
     pub directory: bool,
@@ -252,10 +254,12 @@ pub(super) struct Record {
     pub names: Vec<Name>,
     pub data: Option<(u64, u64)>,
     pub data_range: Option<(u64, u64)>,
+    pub data_extent: u64,
     pub named: Vec<Stream>,
     pub continuations: Vec<Stream>,
     pub incomplete: bool,
-    pub required: Vec<u64>,
+    pub required: Vec<ListEntry>,
+    pub present: Vec<ListEntry>,
     pub modified: u64,
     pub reparse: bool,
 }
@@ -270,6 +274,7 @@ impl Record {
                 return Err("Duplicate unnamed NTFS stream header".into());
             }
             self.data_range = stream.range;
+            self.data_extent = stream.extent;
         } else {
             if self.named.iter().any(|s| s.name == stream.name) {
                 return Err("Duplicate named NTFS stream header".into());
@@ -288,6 +293,7 @@ impl Record {
                 logical,
                 allocated,
                 range: other.data_range,
+                extent: other.data_extent,
             })?;
         }
         for stream in other.named {
@@ -295,10 +301,22 @@ impl Record {
         }
         self.names.extend(other.names);
         self.continuations.extend(other.continuations);
+        self.present.extend(other.present);
+        self.required.extend(other.required);
         self.reparse |= other.reparse;
         Ok(())
     }
     pub fn finalize_streams(&mut self, cancelled: bool) -> Result<(), String> {
+        if self
+            .required
+            .iter()
+            .any(|entry| !self.present.contains(entry))
+        {
+            if !cancelled {
+                return Err("Missing or mismatched listed NTFS attribute".into());
+            }
+            self.incomplete = true;
+        }
         self.continuations
             .sort_unstable_by(|a, b| (&a.name, a.range).cmp(&(&b.name, b.range)));
         for part in &self.continuations {
@@ -339,7 +357,40 @@ impl Record {
                 base.1 = part.1;
             }
         }
+        let mut extents = vec![];
+        if let Some((logical, _)) = self.data {
+            extents.push((logical.max(self.data_extent), self.data_range));
+        }
+        extents.extend(
+            self.named
+                .iter()
+                .map(|s| (s.logical.max(s.extent), s.range)),
+        );
+        for (logical, range) in extents {
+            if let Some((low, high)) = range {
+                // Virtual coverage includes sparse holes, compression padding and preallocation.
+                // It is deliberately independent of physically mapped allocation.
+                if low != 0
+                    || (logical != 0
+                        && high
+                            .checked_add(1)
+                            .and_then(|n| n.checked_mul(self.cluster))
+                            .is_none_or(|n| n < logical))
+                {
+                    if !cancelled {
+                        return Err("Incomplete terminal NTFS stream coverage".into());
+                    }
+                    self.incomplete = true;
+                }
+            }
+        }
         Ok(())
+    }
+    pub fn named_logical(&self) -> Result<u64, String> {
+        self.named.iter().try_fold(0u64, |sum, s| {
+            sum.checked_add(s.logical)
+                .ok_or_else(|| "Named stream size overflow".into())
+        })
     }
     pub fn allocation(&self) -> Result<u64, String> {
         self.named
@@ -367,7 +418,12 @@ impl Record {
             .dedup_by(|a, b| a.parent == b.parent && a.text == b.text);
     }
 }
-pub(super) fn parse(raw: &[u8], index: u64, cluster: u64) -> Result<Option<Record>, String> {
+pub(super) fn parse(
+    raw: &[u8],
+    index: u64,
+    cluster: u64,
+    total_clusters: Option<u64>,
+) -> Result<Option<Record>, String> {
     let flags = u16_at(raw, 22).ok_or("Missing record flags")?;
     if flags & 1 == 0 {
         return Ok(None);
@@ -376,13 +432,30 @@ pub(super) fn parse(raw: &[u8], index: u64, cluster: u64) -> Result<Option<Recor
         return Err("NTFS record index overflow".into());
     }
     let mut record = Record {
+        cluster,
         reference: index | ((u16_at(raw, 16).ok_or("Missing record sequence")? as u64) << 48),
         base: u64_at(raw, 32).ok_or("Missing base reference")?,
         directory: flags & 2 != 0,
         links: u16_at(raw, 18).ok_or("Missing NTFS link count")?,
         ..Default::default()
     };
-    for attr in attributes(raw)? {
+    let attrs = attributes(raw)?;
+    let needs_identities =
+        record.base != 0 || attrs.iter().any(|attr| u32_at(attr, 0) == Some(0x20));
+    for attr in attrs {
+        if needs_identities {
+            record.present.push(ListEntry {
+                typ: u32_at(attr, 0).ok_or("Missing attribute type")?,
+                vcn: if attr[8] == 1 {
+                    u64_at(attr, 16).ok_or("Missing attribute VCN")?
+                } else {
+                    0
+                },
+                reference: record.reference,
+                instance: u16_at(attr, 14).ok_or("Missing attribute instance")?,
+                name: attribute_name(attr)?,
+            });
+        }
         match u32_at(attr, 0).unwrap_or(0) {
             0x10 => {
                 if attr[8] == 0 {
@@ -394,11 +467,9 @@ pub(super) fn parse(raw: &[u8], index: u64, cluster: u64) -> Result<Option<Recor
             }
             0x20 => {
                 if attr[8] == 0 {
-                    record.required.extend(
-                        attribute_list(resident(attr)?)?
-                            .into_iter()
-                            .map(|e| e.reference),
-                    );
+                    record.required.extend(attribute_list(resident(attr)?)?);
+                } else {
+                    return Err("Unsupported nonresident attribute list in bulk NTFS record; completeness cannot be verified".into());
                 }
             }
             0x30 => {
@@ -432,6 +503,7 @@ pub(super) fn parse(raw: &[u8], index: u64, cluster: u64) -> Result<Option<Recor
                         logical: resident(attr)?.len() as u64,
                         allocated: 0,
                         range: None,
+                        extent: 0,
                     })?;
                 } else {
                     let low = u64_at(attr, 16).ok_or("Missing stream VCN")?;
@@ -441,6 +513,18 @@ pub(super) fn parse(raw: &[u8], index: u64, cluster: u64) -> Result<Option<Recor
                         return Err("Invalid data mapping geometry".into());
                     }
                     let mapping = runs(attr.get(offset..).ok_or("Invalid data mapping offset")?)?;
+                    for run in &mapping {
+                        if let Some(lcn) = run.lcn {
+                            let end = lcn
+                                .checked_add(run.clusters)
+                                .ok_or("Physical extent overflow")?;
+                            if total_clusters.is_some_and(|total| end > total) {
+                                return Err("NTFS data extent exceeds the volume".into());
+                            }
+                            end.checked_mul(cluster)
+                                .ok_or("Physical data extent overflow")?;
+                        }
+                    }
                     let covered = mapping
                         .iter()
                         .try_fold(0u64, |sum, r| sum.checked_add(r.clusters))
@@ -464,8 +548,23 @@ pub(super) fn parse(raw: &[u8], index: u64, cluster: u64) -> Result<Option<Recor
                             0
                         },
                         allocated: physical,
-                        range: Some((low, high)),
+                        range: (covered != 0).then_some((low, high)),
+                        extent: if low == 0 {
+                            u64_at(attr, 40).ok_or("Missing declared stream extent")?
+                        } else {
+                            0
+                        },
                     };
+                    if low == 0
+                        && (stream.extent > i64::MAX as u64
+                            || stream.logical > i64::MAX as u64
+                            || !stream.extent.is_multiple_of(cluster))
+                    {
+                        return Err("Invalid declared NTFS stream extent".into());
+                    }
+                    if covered == 0 && stream.extent != 0 {
+                        return Err("Missing preallocated data mapping runs".into());
+                    }
                     if covered == 0 && (low != 0 || stream.logical != 0) {
                         return Err("Missing data mapping runs".into());
                     }

@@ -179,6 +179,40 @@ pub fn volume_space(root: &Path) -> Option<(u64, u64)> {
 pub fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
+
+/// Same representation at scan time and execution time; no 32-bit serial truncation.
+pub fn handle_identity(file: &File) -> io::Result<(u64, u64)> {
+    let mut info: FILE_ID_INFO = unsafe { zeroed() };
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileIdInfo,
+            &mut info as *mut _ as _,
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if info.FileId.Identifier[8..].iter().any(|&b| b != 0) {
+        return Err(io::Error::other("Unsupported non-NTFS file identity"));
+    }
+    Ok((
+        info.VolumeSerialNumber,
+        u64::from_le_bytes(info.FileId.Identifier[..8].try_into().unwrap()),
+    ))
+}
+
+pub fn identity_handle(path: &Path, allow_delete: bool) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if allow_delete { FILE_SHARE_DELETE } else { 0 },
+        )
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(extended_path(path))
+}
 pub fn display_path(path: PathBuf) -> PathBuf {
     let raw = path.to_string_lossy();
     if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {

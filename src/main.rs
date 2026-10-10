@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-mod ui;
+use canopy::ui;
 
 fn main() -> eframe::Result {
     #[cfg(not(windows))]

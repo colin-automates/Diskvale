@@ -18,6 +18,272 @@ fn volume_access_failure_explains_permissions_only_when_denied() {
 fn put16(b: &mut [u8], i: usize, v: u16) {
     b[i..i + 2].copy_from_slice(&v.to_le_bytes());
 }
+
+#[test]
+fn regression_missing_terminal_extent_is_rejected_by_bulk_parser() {
+    let mut bytes = fixture();
+    let raw = record(
+        20,
+        false,
+        0,
+        vec![
+            filename(30, "short.bin", 1),
+            nonresident("", 8192, 4096, 0, 0, 0, &[0x11, 1, 50, 0]),
+        ],
+    );
+    bytes[20 * 1024..21 * 1024].copy_from_slice(&raw);
+    assert!(
+        read_index(
+            Cursor::new(bytes),
+            Path::new("C:\\"),
+            Geometry {
+                record_size: 1024,
+                sector: 512,
+                cluster: 4096,
+                valid: 65536,
+                total_clusters: None,
+            },
+            &Progress::default(),
+            "fixture"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn missing_terminal_extension_and_preallocated_tail_are_not_complete() {
+    let mut bytes = fixture();
+    bytes[20 * 1024..21 * 1024].copy_from_slice(&record(
+        20,
+        false,
+        0,
+        vec![
+            filename(30, "preallocated-tail.bin", 1),
+            nonresident("", 100, 8192, 0, 0, 0, &[0x11, 1, 50, 0]),
+        ],
+    ));
+    assert!(
+        scan(bytes)
+            .unwrap_err()
+            .contains("terminal NTFS stream coverage")
+    );
+    let mut bytes = fixture();
+    bytes[26 * 1024..27 * 1024].fill(0);
+    assert!(scan(bytes).unwrap_err().contains("attribute-list record"));
+}
+#[test]
+fn bulk_data_extents_are_bounded_by_known_volume_geometry() {
+    let mut geometry = geometry(fixture().len());
+    geometry.total_clusters = Some(1);
+    assert!(
+        read_index(
+            Cursor::new(fixture()),
+            Path::new("C:\\"),
+            geometry,
+            &Progress::default(),
+            "fixture"
+        )
+        .unwrap_err()
+        .contains("exceeds the volume")
+    );
+    geometry.total_clusters = Some(1_000_000);
+    assert!(
+        read_index(
+            Cursor::new(fixture()),
+            Path::new("C:\\"),
+            geometry,
+            &Progress::default(),
+            "fixture"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn regression_directory_and_root_streams_are_accounted() {
+    let mut bytes = fixture();
+    for (id, parent, name) in [(5, 5, "."), (30, 5, "folder")] {
+        let raw = record(
+            id,
+            true,
+            0,
+            vec![
+                filename(parent, name, 1),
+                resident_attr(0x80, "resident", b"abc"),
+                nonresident("named", 100, 4096, 0, 0, 0, &[0x11, 1, 51, 0]),
+            ],
+        );
+        bytes[id as usize * 1024..(id as usize + 1) * 1024].copy_from_slice(&raw);
+    }
+    let scan = read_index(
+        Cursor::new(bytes),
+        Path::new("C:\\"),
+        Geometry {
+            record_size: 1024,
+            sector: 512,
+            cluster: 4096,
+            valid: 65536,
+            total_clusters: None,
+        },
+        &Progress::default(),
+        "fixture",
+    )
+    .unwrap();
+    let baseline = read_index(
+        Cursor::new(fixture()),
+        Path::new("C:\\"),
+        Geometry {
+            record_size: 1024,
+            sector: 512,
+            cluster: 4096,
+            valid: 65536,
+            total_clusters: None,
+        },
+        &Progress::default(),
+        "fixture",
+    )
+    .unwrap();
+    assert_eq!(scan.nodes[0].allocated, baseline.nodes[0].allocated + 8192);
+    assert_eq!(scan.nodes.iter().filter(|n| n.synthetic).count(), 2);
+    assert_eq!(
+        scan.extensions(crate::model::Metric::Allocated)
+            .iter()
+            .map(|t| t.1)
+            .sum::<u64>(),
+        scan.nodes[0].allocated
+    );
+    let totals = crate::query::map_totals(
+        &scan,
+        crate::model::Metric::Allocated,
+        &crate::query::Query::parse(""),
+        None,
+    );
+    assert_eq!(totals.bytes[0], scan.nodes[0].allocated);
+    assert_eq!(totals.files[0], scan.stats.files);
+    for (id, node) in scan.nodes.iter().enumerate().filter(|(_, n)| n.synthetic) {
+        assert_eq!(scan.path(id), scan.path(node.parent.unwrap()));
+        assert!(crate::recycle::Target::from_scan(&scan, id).is_err());
+        let tiles = crate::treemap::nested(
+            &scan,
+            node.parent.unwrap(),
+            crate::model::Metric::Allocated,
+            crate::treemap::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 2000.0,
+                h: 1200.0,
+            },
+        );
+        assert_eq!(
+            tiles
+                .iter()
+                .find(|t| t.id == id && t.kind == crate::treemap::Kind::File)
+                .unwrap()
+                .size,
+            node.allocated
+        );
+    }
+    let output = tempfile::tempdir().unwrap();
+    let csv_path = output.path().join("directory-streams.csv");
+    crate::output::csv(&scan, &csv_path, &Progress::default()).unwrap();
+    let records: Vec<_> = csv::Reader::from_path(csv_path)
+        .unwrap()
+        .records()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(records.iter().filter(|r| &r[8] == "true").count(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| &r[1] == "false")
+            .map(|r| r[3].parse::<u64>().unwrap())
+            .sum::<u64>(),
+        scan.nodes[0].allocated
+    );
+    for row in records.iter().filter(|r| &r[8] == "true") {
+        assert!(!row[0].ends_with("Directory streams"));
+        assert_eq!(&row[6], "0");
+    }
+}
+
+#[test]
+fn listed_attribute_identity_and_nonresident_list_completeness_are_enforced() {
+    for wrong in [
+        resident_attr(0x10, "", &[0; 32]),
+        resident_attr(0x80, "wrong-name", b"abc"),
+    ] {
+        let mut bytes = fixture();
+        bytes[26 * 1024..27 * 1024].copy_from_slice(&record(26, false, reference(25), vec![wrong]));
+        assert!(scan(bytes).unwrap_err().contains("listed NTFS attribute"));
+    }
+    let mut bytes = fixture();
+    let mut list = nonresident("", 32, 4096, 0, 0, 0, &[0x11, 1, 51, 0]);
+    put32(&mut list, 0, 0x20);
+    bytes[25 * 1024..26 * 1024].copy_from_slice(&record(
+        25,
+        false,
+        0,
+        vec![filename(30, "list.bin", 1), list],
+    ));
+    assert!(
+        scan(bytes)
+            .unwrap_err()
+            .contains("Unsupported nonresident attribute list")
+    );
+}
+
+#[test]
+fn virtual_coverage_accepts_preallocation_and_sparse_directory_streams() {
+    let mut bytes = fixture();
+    bytes[20 * 1024..21 * 1024].copy_from_slice(&record(
+        20,
+        false,
+        0,
+        vec![
+            filename(30, "preallocated.bin", 1),
+            nonresident("", 100, 8192, 0, 0, 1, &[0x11, 2, 50, 0]),
+        ],
+    ));
+    bytes[5 * 1024..6 * 1024].copy_from_slice(&record(
+        5,
+        true,
+        0,
+        vec![
+            filename(5, ".", 1),
+            nonresident(
+                "sparse-named",
+                8192,
+                4096,
+                0x8000,
+                0,
+                1,
+                &[0x11, 1, 50, 0x01, 1, 0],
+            ),
+        ],
+    ));
+    let scan = scan(bytes).unwrap();
+    assert_eq!(scan.nodes[0].own_allocated, 4096);
+    assert_eq!(scan.nodes[0].own_logical, 8192);
+    assert_eq!(
+        scan.nodes
+            .iter()
+            .find(|n| n.name == "preallocated.bin")
+            .unwrap()
+            .allocated,
+        8192
+    );
+    let file = scan.nodes.iter().find(|n| n.name == "large.bin").unwrap();
+    assert_eq!(file.logical, 736);
+    assert_eq!(file.named_logical, 100);
+    assert_eq!(
+        scan.nodes
+            .iter()
+            .filter(|n| !n.directory)
+            .map(|n| n.allocated)
+            .sum::<u64>(),
+        scan.nodes[0].allocated
+    );
+}
 fn put32(b: &mut [u8], i: usize, v: u32) {
     b[i..i + 4].copy_from_slice(&v.to_le_bytes());
 }
@@ -74,7 +340,7 @@ fn nonresident(
     put64(&mut a, 16, vcn);
     put64(&mut a, 24, highest);
     put16(&mut a, 32, off as u16);
-    put64(&mut a, 40, 65536);
+    put64(&mut a, 40, if vcn == 0 { (highest + 1) * 4096 } else { 0 });
     put64(&mut a, 48, logical);
     put64(&mut a, 56, logical);
     if flags & 0x80ff != 0 {
@@ -281,6 +547,7 @@ fn geometry(len: usize) -> Geometry {
         sector: 512,
         cluster: 4096,
         valid: len as u64,
+        total_clusters: None,
     }
 }
 fn scan(bytes: Vec<u8>) -> Result<Scan, String> {
@@ -329,7 +596,7 @@ fn rejects_torn_sector_and_only_allows_restored_kernel_records() {
 fn ignores_deleted_records() {
     let mut b = record(0, false, 0, vec![]);
     put16(&mut b, 22, 0);
-    assert!(parse(&b, 42, 4096).unwrap().is_none());
+    assert!(parse(&b, 42, 4096, None).unwrap().is_none());
 }
 #[test]
 fn rejects_invalid_attributes_and_header_overlap() {
@@ -380,6 +647,12 @@ fn saved_index_uses_volume_version_and_same_bulk_parser() {
     let scan = scan_file(Path::new("C:\\fixture"), file.path(), &Progress::default()).unwrap();
     assert_eq!(scan.nodes[0].allocated, 94208);
     assert_eq!(scan.stats.engine, "Saved NTFS MFT (read only)");
+    assert_eq!(
+        scan.stats.runtime.provenance(),
+        crate::model::Provenance::Replay
+    );
+    assert!(!scan.deletion_eligible());
+    assert!(crate::recycle::Target::from_scan(&scan, 1).is_err());
     let mut bad = fixture();
     let mut b = record(
         3,
@@ -723,6 +996,11 @@ fn cancellation_returns_explicit_partial_mft_tree() {
     )
     .unwrap();
     assert!(result.stats.cancelled);
+    assert_eq!(
+        result.stats.runtime.provenance(),
+        crate::model::Provenance::Incomplete
+    );
+    assert!(!result.deletion_eligible());
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.stats.mft_records, 0);
 }

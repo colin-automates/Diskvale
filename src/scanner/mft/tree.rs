@@ -20,6 +20,13 @@ pub(super) fn build(
         root: root.to_path_buf(),
         nodes: vec![Node::new(root.display().to_string(), None, true)],
         stats: ScanStats {
+            runtime: crate::model::RuntimeState::new(if cancelled {
+                crate::model::Provenance::Incomplete
+            } else {
+                crate::model::Provenance::Snapshot
+            }),
+            schema_version: 2,
+            directory_streams_captured: true,
             engine: engine.into(),
             cancelled,
             ..Default::default()
@@ -39,6 +46,23 @@ pub(super) fn build(
         record
             .finalize_streams(cancelled)
             .map_err(|e| format!("NTFS record {}: {e}", format::slot(record.reference)))?;
+    }
+    // Preserve directory-owned data separately from descendant totals. A synthetic
+    // leaf supplies the existing map/query/type pipelines without inventing a path.
+    fn directory_data(node: &mut Node, record: &Record) -> Result<(), String> {
+        node.reference = Some(record.reference);
+        node.reparse = record.reparse;
+        node.modified = record.modified;
+        node.own_logical = record
+            .named_logical()?
+            .checked_add(record.data.map_or(0, |s| s.0))
+            .ok_or("Directory stream size overflow")?;
+        node.own_allocated = record.allocation()?;
+        node.allocation_unknown = record.incomplete;
+        Ok(())
+    }
+    if let Some(record) = records.iter().find(|r| r.reference == root_ref) {
+        directory_data(&mut scan.nodes[0], record)?;
     }
     // An active record with zero links need not belong to the directory namespace.
     // Keep its accounting explicit rather than inventing a filesystem path for it.
@@ -77,7 +101,7 @@ pub(super) fn build(
         }
         let id = scan.nodes.len();
         let mut node = Node::new(record.names[0].text.clone(), None, true);
-        node.modified = record.modified;
+        directory_data(&mut node, record)?;
         scan.nodes.push(node);
         dirs.insert(record.reference, id);
         pending.push((id, record.names[0].parent));
@@ -133,6 +157,22 @@ pub(super) fn build(
         scan.nodes = retained;
     }
     scan.stats.folders = scan.nodes.len().saturating_sub(1) as u64;
+    for id in 0..scan.nodes.len() {
+        let owner = &scan.nodes[id];
+        if owner.own_logical == 0 && owner.own_allocated == 0 && !owner.allocation_unknown {
+            continue;
+        }
+        let mut bucket = Node::new("Directory streams".into(), Some(id), false);
+        bucket.synthetic = true;
+        bucket.files = 0;
+        bucket.logical = owner.own_logical;
+        bucket.allocated = owner.own_allocated;
+        bucket.allocation_unknown = owner.allocation_unknown;
+        bucket.modified = owner.modified;
+        let child = scan.nodes.len();
+        scan.nodes.push(bucket);
+        scan.nodes[id].children.push(child);
+    }
     for record in records.into_iter().filter(|r| !r.directory) {
         if !cancelled && progress.cancelled() {
             scan.stats.cancelled = true;
@@ -151,6 +191,7 @@ pub(super) fn build(
         let allocated = record.allocation()?;
         let logical = record.data.map_or(0, |s| s.0);
         let incomplete = record.incomplete;
+        let named_logical = record.named_logical()?;
         let mut linked = false;
         for name in record.names {
             let Some(&parent) = dirs.get(&name.parent) else {
@@ -162,6 +203,9 @@ pub(super) fn build(
             };
             let mut node = Node::new(name.text, Some(parent), false);
             node.logical = logical;
+            node.named_logical = named_logical;
+            node.reference = Some(record.reference);
+            node.reparse = record.reparse;
             node.allocated = if linked { 0 } else { allocated };
             node.shared = linked;
             node.modified = record.modified;
@@ -180,6 +224,9 @@ pub(super) fn build(
         }
     }
     scan.stats.cancelled |= progress.cancelled();
+    if scan.stats.cancelled {
+        scan.stats.runtime = crate::model::RuntimeState::new(crate::model::Provenance::Incomplete);
+    }
     if scan.stats.unlinked_records > 0 {
         scan.stats.notices.push(format!("{} active NTFS records have no directory names and are excluded from the visible tree; their data totals {} logical and {} allocated bytes.",scan.stats.unlinked_records,scan.stats.unlinked_logical_bytes,scan.stats.unlinked_allocated_bytes));
     }
