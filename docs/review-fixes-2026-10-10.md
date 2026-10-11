@@ -109,3 +109,14 @@ Not performed: real Recycle Bin/permanent-deletion integration (separate opt-in 
 - `README.md`, `CONTRIBUTING.md`, this report: accounting, snapshot compatibility, job/output behavior, deletion guarantees, opt-in instructions, and validation evidence.
 
 No dependency, Cargo version, release workflow, brand asset, or production deployment changes were made.
+
+## Review follow-up fixes
+
+Two confirmed findings from the subsequent review were repaired after commit `a0cc5bd`:
+
+- Snapshot validation checks exact duplicate sibling names, preserving case-distinct names such as `Foo.txt` and `foo.txt`. A production save/load fixture verifies both names, totals, separate comparison keys, and read-only provenance; exact duplicate names are still rejected. No snapshot schema change is needed.
+- Query parsing uses Unicode lowercase, matching filename normalization. Regressions cover accented mixed-case terms and extensions, combined size filters, and expanding lowercase characters. Production egui frames verify matching files, Map bytes/counts/tiles, and Types totals across view switches with both size metrics, including a query with no matches.
+
+`cargo test --locked --lib review_regression_` first failed all three new tests against the previous implementation, then passed all three after the repairs. `cargo fmt --all -- --check`, `cargo test --locked` (**126 passed, 3 ignored**), `cargo clippy --locked --all-targets -- -D warnings`, and `git diff --check` passed. The suite used synthetic data and disposable JSON fixtures; no case-sensitivity setting on a real directory was changed and no live drive or successful Shell deletion was exercised.
+
+Follow-up Windows validation passed: `./scripts/build_release.ps1` (44.26 seconds), `./scripts/package_release.ps1 -OutputDirectory artifacts/review-validation/followup-fixes/package`, and `python scripts/check_brand_resources.py --output artifacts/review-validation/followup-fixes/resource-checks`. The 10 embedded icon sizes match source, version metadata and Windows extraction pass, and no separate Visual C++ runtime is required. The follow-up executable SHA-256 is `9ede17dad2ff9f57176d413aa0a49a1e0f4ebe10e9d70704470328c74d656c6e`; ZIP SHA-256 is `0af43e8d3122a52d0aa1572e04ec67f0730996ad0e9cc782779fce1ec2b8c134`. The earlier package and timing evidence above describe the initial eight-finding repair and are retained separately. Native window/GPU acceptance was not performed; the regression checks exercised production egui CPU frames.

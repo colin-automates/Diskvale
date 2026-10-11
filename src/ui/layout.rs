@@ -3859,6 +3859,91 @@ mod tests {
         assert_eq!(&*app.rows, &[5]);
     }
     #[test]
+    fn review_regression_unicode_search_agrees_across_map_files_and_types() {
+        for metric in [Metric::Allocated, Metric::Logical] {
+            for (input, expected) in [
+                ("ÉTÉ", vec![1, 2]),
+                ("éTÉ", vec![1, 2]),
+                ("EXT:ÉTÉ", vec![2]),
+                ("CAFÉ EXT:ÉTÉ >1B", vec![2]),
+                ("MISSÉ", vec![]),
+            ] {
+                let mut scan = Scan {
+                    root: "C:\\".into(),
+                    stats: Default::default(),
+                    nodes: vec![
+                        Node::new("root".into(), None, true),
+                        Node::new("été.txt".into(), Some(0), false),
+                        Node::new("CAFÉ.ÉTÉ".into(), Some(0), false),
+                        Node::new("other.txt".into(), Some(0), false),
+                    ],
+                };
+                scan.nodes[0].children = vec![1, 2, 3];
+                for id in 1..=3 {
+                    scan.nodes[id].logical = id as u64 * 100;
+                    scan.nodes[id].allocated = id as u64 * 4096;
+                }
+                scan.finish();
+                let bytes: u64 = expected.iter().map(|&id| scan.nodes[id].size(metric)).sum();
+                let ctx = egui::Context::default();
+                configure_ui(&ctx);
+                let size = vec2(1050.0, 700.0);
+                let mut app = app(Some(scan));
+                app.selected = None;
+                app.metric = metric;
+                app.query = input.into();
+                for view in [View::Largest, View::Folders, View::Types, View::Largest] {
+                    app.view = view;
+                    app.dirty = true;
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        settle(&ctx, &mut app, size);
+                        if app.filter_key.as_ref() == Some(&(metric, input.to_owned(), None)) {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "Filter did not finish for {input}"
+                        );
+                        std::thread::yield_now();
+                    }
+                    let mut rows = app.rows.to_vec();
+                    rows.sort_unstable();
+                    assert_eq!(rows, expected, "Files disagree for {input}");
+                    assert_eq!(
+                        app.weights.as_ref().unwrap()[0],
+                        bytes,
+                        "Map disagrees for {input}"
+                    );
+                    assert_eq!(
+                        app.matching_files.as_ref().unwrap()[0],
+                        expected.len() as u64
+                    );
+                    let types = app.type_results(&ctx, true).unwrap();
+                    assert_eq!(
+                        types.iter().map(|row| row.1).sum::<u64>(),
+                        bytes,
+                        "Types disagree for {input}"
+                    );
+                    assert_eq!(
+                        types.iter().map(|row| row.2).sum::<u64>(),
+                        expected.len() as u64
+                    );
+                    if view == View::Folders {
+                        let mut tiles: Vec<_> = app
+                            .map_cache
+                            .iter()
+                            .filter(|tile| tile.kind == treemap::Kind::File)
+                            .map(|tile| tile.id)
+                            .collect();
+                        tiles.sort_unstable();
+                        assert_eq!(tiles, expected, "Map tiles disagree for {input}");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn pending_file_results_leave_the_tabs_usable() {
         let size = vec2(1050.0, 700.0);
         let ctx = egui::Context::default();

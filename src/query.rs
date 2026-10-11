@@ -30,7 +30,7 @@ impl Query {
     pub fn parse_at(input: &str, now: u64) -> Self {
         let mut result = Self::default();
         for token in input.split_whitespace() {
-            let token = token.to_ascii_lowercase();
+            let token = token.to_lowercase();
             if let Some(age) = token
                 .strip_prefix("older:")
                 .or_else(|| token.strip_prefix("newer:"))
@@ -174,6 +174,18 @@ pub fn map_totals(
 mod tests {
     use super::*;
     use crate::model::{Node, ScanStats};
+    #[test]
+    fn review_regression_unicode_terms_and_extensions_use_matching_normalization() {
+        for input in ["ÉTÉ", "éTÉ", "CAFÉ EXT:ÉTÉ >1B", "EXT:ÉTÉ"] {
+            let query = Query::parse(input);
+            assert!(query.matches("café.été", 4096, 0), "{input}");
+            assert!(!query.matches("other.txt", 4096, 0), "{input}");
+        }
+        assert!(!Query::parse("CAFÉ EXT:ÉTÉ >1B").matches("café.txt", 4096, 0));
+        assert!(!Query::parse("CAFÉ EXT:ÉTÉ >1B").matches("café.été", 1, 0));
+        // Unicode lowercase can expand a character; use the same operation on both sides.
+        assert!(Query::parse("İNCİ").matches("İNCİ.txt", 4096, 0));
+    }
     #[test]
     fn structured_search_uses_explicit_decimal_and_binary_units() {
         let query = Query::parse("ext:MP4 >1GB <2GiB capture");

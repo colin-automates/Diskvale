@@ -52,7 +52,7 @@ The tour uses the actual application UI with a generated studio drive. Demo sour
 | `older:1y` | Files last modified more than 365 days ago |
 | `ext:zip newer:30d` | ZIP files modified within the last 30 days |
 
-Size filters use the selected size metric. GB/MB/KB are decimal; GiB/MiB/KiB are binary. Age units are days (`d`), weeks (`w`), 30-day months (`m`), and 365-day years (`y`). Files without a recorded date do not match age filters. Search and category filters follow you into folders.
+Size filters use the selected size metric. GB/MB/KB are decimal; GiB/MiB/KiB are binary. Age units are days (`d`), weeks (`w`), 30-day months (`m`), and 365-day years (`y`). Files without a recorded date do not match age filters. Search terms and extensions use the same Unicode lowercase matching in Map, Files, and Types. Search and category filters follow you into folders.
 
 ## How it works
 
@@ -72,7 +72,7 @@ Directory index allocation and other volume overhead are excluded from file tota
 
 ### Snapshots, background work, and deletion
 
-Snapshot schema 2 adds NTFS identities and directory-stream accounting. Older snapshots remain readable when their tree and aggregate totals validate. They retain an explicit warning that directory-stream data was not captured; saving them again does not manufacture that missing data. Comparisons require the same accounting profile. Saved snapshots and saved-MFT replays provide read-only browsing/export and never authorize deletion, regardless of serialized flags or notices.
+Snapshot schema 2 adds NTFS identities and directory-stream accounting. Older snapshots remain readable when their tree and aggregate totals validate. Case-distinct sibling names are preserved when reopening and comparing captures; exact duplicate names remain invalid. Legacy captures retain an explicit warning that directory-stream data was not captured; saving them again does not manufacture that missing data. Comparisons require the same accounting profile. Saved snapshots and saved-MFT replays provide read-only browsing/export and never authorize deletion, regardless of serialized flags or notices.
 
 Save, CSV export, and comparison preparation run in one bounded background job using the current immutable scan. The status bar shows busy/progress/error state and **Cancel job**. Replacement scans cancel the old job; an old comparison is discarded, and completed old outputs identify their originating scan. Native file dialogs stay on the UI thread. Outputs are staged beside the destination, flushed and synced, then replaced without first removing the old output. Cancellation after the replacement commit cannot undo it; this does not guarantee power-loss durability on every filesystem.
 

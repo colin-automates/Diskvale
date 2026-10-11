@@ -1203,8 +1203,9 @@ fn valid_snapshot(scan: &Scan) -> bool {
             if child >= scan.nodes.len() || scan.nodes[child].parent != Some(id) {
                 return false;
             }
-            if !scan.nodes[child].synthetic && !names.insert(scan.nodes[child].name.to_lowercase())
-            {
+            // NTFS can preserve case-distinct siblings. Reject exact duplicates
+            // without applying a case-insensitive namespace to imported captures.
+            if !scan.nodes[child].synthetic && !names.insert(scan.nodes[child].name.as_str()) {
                 return false;
             }
             stack.push(child);
@@ -1368,6 +1369,55 @@ pub fn cli() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_regression_case_distinct_snapshot_round_trip_preserves_comparison_keys() {
+        use canopy::model::Node;
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("case-sensitive.json");
+        let mut scan = Scan {
+            root: "C:\\".into(),
+            stats: Default::default(),
+            nodes: vec![
+                Node::new("root".into(), None, true),
+                Node::new("case-sensitive".into(), Some(0), true),
+                Node::new("Foo.txt".into(), Some(1), false),
+                Node::new("foo.txt".into(), Some(1), false),
+            ],
+        };
+        scan.nodes[0].children = vec![1];
+        scan.nodes[1].children = vec![2, 3];
+        scan.nodes[2].logical = 100;
+        scan.nodes[2].allocated = 4096;
+        scan.nodes[3].logical = 200;
+        scan.nodes[3].allocated = 8192;
+        scan.stats.directory_streams_captured = true;
+        scan.finish();
+        write_snapshot(&scan, &path).unwrap();
+        let loaded = read_snapshot(&path, Arc::default()).unwrap();
+        assert_eq!(loaded.nodes[2].name, "Foo.txt");
+        assert_eq!(loaded.nodes[3].name, "foo.txt");
+        assert_eq!(loaded.nodes[0].allocated, 12288);
+        assert_eq!(loaded.stats.files, 2);
+        assert!(!loaded.deletion_eligible());
+        let map: HashMap<_, _> = loaded
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, node)| (comparison_key(&loaded, id), (node.logical, node.allocated)))
+            .collect();
+        assert_eq!(map.len(), loaded.nodes.len());
+        assert_eq!(map[&comparison_key(&scan, 2)], (100, 4096));
+        assert_eq!(map[&comparison_key(&scan, 3)], (200, 8192));
+
+        // Exact duplicate siblings remain malformed, even with different node IDs/sizes.
+        scan.nodes[3].name = "Foo.txt".into();
+        write_snapshot(&scan, &path).unwrap();
+        assert!(
+            read_snapshot(&path, Arc::default())
+                .unwrap_err()
+                .contains("Invalid")
+        );
+    }
     #[test]
     fn snapshot_invariants_reject_unsafe_components_overflows_and_forged_totals() {
         use canopy::model::Node;
