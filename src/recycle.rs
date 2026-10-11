@@ -162,14 +162,24 @@ fn validate_path(path: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn check_live_target(target: &Target) -> Result<Vec<std::fs::File>, String> {
+#[derive(Debug)]
+struct TargetGuards {
+    _ancestors: Vec<std::fs::File>,
+    target: Option<std::fs::File>,
+}
+
+#[cfg(windows)]
+fn check_live_target(target: &Target) -> Result<TargetGuards, String> {
     use crate::scanner::windows;
     use std::os::windows::fs::MetadataExt;
     validate_path(&target.path)?;
     if !target.authority.eligible() {
         return Err("This scan no longer authorizes deletion. Rescan.".into());
     }
-    let mut handles = vec![];
+    let mut guards = TargetGuards {
+        _ancestors: vec![],
+        target: None,
+    };
     for (path, reference, is_target) in target
         .ancestors
         .iter()
@@ -209,9 +219,13 @@ fn check_live_target(target: &Target) -> Result<Vec<std::fs::File>, String> {
         if !is_target && !metadata.is_dir() {
             return Err("Ancestor changed kind. Rescan.".into());
         }
-        handles.push(handle);
+        if is_target {
+            guards.target = Some(handle);
+        } else {
+            guards._ancestors.push(handle);
+        }
     }
-    Ok(handles)
+    Ok(guards)
 }
 
 /// Called only after confirmation of this exact target and deletion method.
@@ -219,7 +233,11 @@ fn check_live_target(target: &Target) -> Result<Vec<std::fs::File>, String> {
 pub fn delete(target: &Target, method: Method) -> Result<Outcome, String> {
     #[cfg(windows)]
     {
-        execute_verified(target, || {}, || windows_backend::delete(target, method))
+        execute_verified(
+            target,
+            || {},
+            |release_target| windows_backend::delete(target, method, release_target),
+        )
     }
     #[cfg(not(windows))]
     {
@@ -232,12 +250,17 @@ pub fn delete(target: &Target, method: Method) -> Result<Outcome, String> {
 fn execute_verified(
     target: &Target,
     pre_operation: impl FnOnce(),
-    operation: impl FnOnce() -> Result<Outcome, String>,
+    operation: impl FnOnce(&mut dyn FnMut()) -> Result<Outcome, String>,
 ) -> Result<Outcome, String> {
-    let _guards = check_live_target(target)?;
+    let mut guards = check_live_target(target)?;
     pre_operation();
-    let _rechecked = check_live_target(target)?;
-    let result = operation();
+    let mut rechecked = check_live_target(target)?;
+    let result = operation(&mut || {
+        // Only after Shell finishes: Windows can defer permanent removal until
+        // the last target handle closes. Ancestor pins remain held to return.
+        drop(guards.target.take());
+        drop(rechecked.target.take());
+    });
     // Revoke at the helper boundary too: callers outside the UI must not reuse
     // authority after a successful or potentially partial backend operation.
     if result != Ok(Outcome::CannotRecycle) {
@@ -431,7 +454,11 @@ mod windows_backend {
         }
     }
 
-    pub(super) fn delete(target: &Target, method: Method) -> std::result::Result<Outcome, String> {
+    pub(super) fn delete(
+        target: &Target,
+        method: Method,
+        release_target: impl FnOnce(),
+    ) -> std::result::Result<Outcome, String> {
         let wide: Vec<u16> = target
             .path
             .as_os_str()
@@ -476,9 +503,15 @@ mod windows_backend {
             Method::Permanent => "permanently delete this item",
         };
         let aborted = operation.map_err(|e| format!("Could not {description}: {e}"))?;
+        if aborted || !completed.load(Ordering::Relaxed) {
+            return Err(format!(
+                "Windows did not finish trying to {description}. Rescan to check the current files."
+            ));
+        }
+        release_target();
         let source_gone = std::fs::symlink_metadata(&target.path)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        if aborted || !completed.load(Ordering::Relaxed) || !source_gone {
+        if !source_gone {
             return Err(format!(
                 "Windows did not finish trying to {description}. Rescan to check the current files."
             ));
@@ -643,7 +676,7 @@ mod tests {
                 std::fs::rename(&target.path, fixture.path().join("original.txt")).unwrap();
                 std::fs::write(&target.path, b"same").unwrap();
             },
-            || panic!("Unsafe replacement reached the backend"),
+            |_| panic!("Unsafe replacement reached the backend"),
         );
         assert!(result.unwrap_err().contains("replaced"));
         let scan = fixture_scan(fixture.path());
@@ -657,7 +690,7 @@ mod tests {
                     "Ancestor guard permitted replacement"
                 );
             },
-            || Ok(Outcome::CannotRecycle),
+            |_| Ok(Outcome::CannotRecycle),
         )
         .unwrap();
         assert!(target.path.exists());
@@ -681,7 +714,7 @@ mod tests {
         scan.stats.runtime.mark_stale();
         assert!(Target::from_scan(&scan, 1).is_err());
         assert!(
-            execute_verified(&target, || {}, || panic!("Stale target reached backend")).is_err()
+            execute_verified(&target, || {}, |_| panic!("Stale target reached backend")).is_err()
         );
         assert!(target.path.exists());
     }
@@ -694,18 +727,18 @@ mod tests {
         let target = Target::from_scan(&scan, 1).unwrap();
         // Inject outcomes only; this test never calls Shell or deletes a file.
         assert_eq!(
-            execute_verified(&target, || {}, || Ok(Outcome::CannotRecycle)),
+            execute_verified(&target, || {}, |_| Ok(Outcome::CannotRecycle)),
             Ok(Outcome::CannotRecycle)
         );
         assert!(scan.deletion_eligible());
         assert_eq!(
-            execute_verified(&target, || {}, || Ok(Outcome::Deleted)),
+            execute_verified(&target, || {}, |_| Ok(Outcome::Deleted)),
             Ok(Outcome::Deleted)
         );
         assert!(!scan.deletion_eligible());
         assert!(Target::from_scan(&scan, 1).is_err());
         assert!(
-            execute_verified(&target, || {}, || panic!("Revoked target reached backend")).is_err()
+            execute_verified(&target, || {}, |_| panic!("Revoked target reached backend")).is_err()
         );
         assert_eq!(std::fs::read(&target.path).unwrap(), b"same");
 
@@ -715,7 +748,7 @@ mod tests {
             execute_verified(
                 &target,
                 || {},
-                || Err("injected potentially partial backend failure".into())
+                |_| Err("injected potentially partial backend failure".into())
             )
             .is_err()
         );
@@ -764,6 +797,76 @@ mod tests {
         scan.nodes[1].parent = Some(2);
         assert!(Target::from_scan(&scan, 1).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn completion_keeps_ancestor_pins_until_after_target_release() {
+        use std::os::windows::ffi::OsStrExt;
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(workspace.join("artifacts")).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("diskvale-completion-fixture-")
+            .tempdir_in(workspace.join("artifacts"))
+            .unwrap();
+        assert!(
+            fixture
+                .path()
+                .canonicalize()
+                .unwrap()
+                .starts_with(workspace.canonicalize().unwrap())
+        );
+        let path = fixture.path().join("new-disposable-file.txt");
+        std::fs::write(&path, b"disposable completion fixture").unwrap();
+        let scan = fixture_scan(fixture.path());
+        let target = Target::from_scan(&scan, 1).unwrap();
+        assert_eq!(target.path, path);
+        execute_verified(
+            &target,
+            || {},
+            |release_target| {
+                let wide: Vec<u16> = target
+                    .path
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect();
+                // Only this newly created fixture is selected for removal. Its parent
+                // must stay pinned both during the operation and after target release.
+                assert_ne!(
+                    unsafe { windows_sys::Win32::Storage::FileSystem::DeleteFileW(wide.as_ptr()) },
+                    0
+                );
+                assert!(
+                    std::fs::rename(fixture.path(), fixture.path().with_extension("moved"))
+                        .is_err()
+                );
+                release_target();
+                assert_eq!(
+                    std::fs::symlink_metadata(&path).unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                assert!(
+                    std::fs::rename(fixture.path(), fixture.path().with_extension("moved"))
+                        .is_err()
+                );
+                Ok(Outcome::Deleted)
+            },
+        )
+        .unwrap();
+        assert!(!scan.deletion_eligible());
+        let moved = fixture.path().with_extension("moved");
+        assert!(!moved.exists());
+        assert!(
+            moved
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .starts_with(workspace.canonicalize().unwrap())
+        );
+        std::fs::rename(fixture.path(), &moved).unwrap();
+        std::fs::rename(&moved, fixture.path()).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn both_delete_methods_reject_roots_changed_kinds_sizes_and_missing_targets() {

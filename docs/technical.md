@@ -33,6 +33,8 @@ Deletion requires a fresh, complete live scan. Diskvale compares the full NTFS r
 
 The sidebar pages direct children in groups of up to 256 while retaining selected ancestry. **More** reaches files and empty directories on later pages, and the last page cycles back; the Files view retains recursive largest-file ordering.
 
+Ancestor identity guards request directory-list access as well as attributes: [attribute-only opens are exempt from sharing restrictions](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew). If this access cannot be obtained, deletion is refused. Target handles remain open through Shell completion, then close before verifying that the source path is gone; Windows can [defer removal until the last handle closes](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-deletefilew). Ancestor guards remain held through that final verification. These lifetime/access corrections preserve the best-effort limits above.
+
 ### Current scope
 
 Diskvale is an early release with an **experimental NTFS reader**. The application scans whole NTFS drives; it does not scan arbitrary folders, network shares, or other filesystems. Opening a folder in the map explores the existing drive index. Unsupported or malformed metadata returns an error instead of silently falling back to another scanner. Ordinary records with nonresident attribute lists currently return an explicit unsupported-completeness error, even if a bulk read might recover their extension records. The supported MFT-bootstrap list reader is unchanged. Missing listed attributes, reused references, incomplete terminal stream coverage, and out-of-volume physical extents are rejected; cancelled scans are explicitly partial.

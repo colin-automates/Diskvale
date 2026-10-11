@@ -206,7 +206,10 @@ pub fn handle_identity(file: &File) -> io::Result<(u64, u64)> {
 pub fn identity_handle(path: &Path, allow_delete: bool) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES)
+        // Attribute-only opens do not enforce sharing restrictions. Ancestor
+        // guards request directory-list access too, so denying DELETE sharing
+        // actually pins even an empty directory against removal or rename.
+        .access_mode(FILE_READ_ATTRIBUTES | if allow_delete { 0 } else { FILE_LIST_DIRECTORY })
         .share_mode(
             FILE_SHARE_READ | FILE_SHARE_WRITE | if allow_delete { FILE_SHARE_DELETE } else { 0 },
         )
