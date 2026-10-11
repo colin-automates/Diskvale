@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Executable = '',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [switch]$TestCandidate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,8 +43,14 @@ foreach ($name in @('LICENSE', 'THIRD_PARTY_NOTICES.txt')) {
 }
 Copy-Item -LiteralPath $Executable -Destination (Join-Path $staging 'Diskvale.exe') -Force
 Copy-Item -LiteralPath $buildInfoPath -Destination (Join-Path $staging 'BUILD_INFO.json') -Force
+$distributionLabel = if ($TestCandidate) { 'Unpublished test candidate - Early preview' } else { 'Early preview' }
+$downloadInfo = if ($TestCandidate) {
+    "Unpublished test candidate. Public release awaits a successful live-drive smoke test.`r`nSource: https://github.com/colin-automates/Diskvale/commit/$sourceCommit"
+} else {
+    "This preview and its downloads:`r`nhttps://github.com/colin-automates/Diskvale/releases/tag/v$version"
+}
 $quickStart = @"
-Diskvale $version - Early preview - Disk space, clearly.
+Diskvale $version - $distributionLabel - Disk space, clearly.
 Source commit: $sourceCommit
 
 1. Extract this ZIP into a folder.
@@ -67,8 +74,7 @@ Deletion uses best-effort identity checks, not an atomic filesystem operation.
 Saved, partial and stale results cannot authorize deletion. Rescan after changes.
 Snapshots and CSVs contain filenames and paths; redact them before sharing.
 
-This preview and its downloads:
-https://github.com/colin-automates/Diskvale/releases/tag/v$version
+$downloadInfo
 
 Report a problem (include version and redacted reproduction/error text):
 https://github.com/colin-automates/Diskvale/issues/new?template=bug_report.yml

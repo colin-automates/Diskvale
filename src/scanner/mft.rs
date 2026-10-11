@@ -12,7 +12,17 @@ use std::{io::Read, path::Path, sync::atomic::Ordering, time::Instant};
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 fn read_index(
-    mut reader: impl Read,
+    reader: impl Read,
+    root: &Path,
+    geometry: source::Geometry,
+    progress: &Progress,
+    engine: &str,
+) -> Result<Scan, String> {
+    read_index_resolved(source::FlatIndex(reader), root, geometry, progress, engine)
+}
+
+fn read_index_resolved(
+    mut reader: impl source::IndexSource,
     root: &Path,
     geometry: source::Geometry,
     progress: &Progress,
@@ -46,10 +56,24 @@ fn read_index(
                 if format::u16_at(raw, 22).is_some_and(|flags| flags & 1 != 0) {
                     format::fixup(raw, geometry.sector, false)
                         .map_err(|e| format!("NTFS record {index}: {e}"))?;
-                    if let Some(record) =
-                        format::parse(raw, index as u64, geometry.cluster, geometry.total_clusters)
-                            .map_err(|e| format!("NTFS record {index}: {e}"))?
-                    {
+                    reader
+                        .validate_record(index, raw)
+                        .map_err(|e| format!("NTFS record {index}: {e}"))?;
+                    let parsed = format::parse_with_lists(
+                        raw,
+                        index as u64,
+                        geometry.cluster,
+                        geometry.total_clusters,
+                        |attr| reader.resolve_list(attr, geometry, progress),
+                    );
+                    let parsed = match parsed {
+                        Err(_) if progress.cancelled() => break,
+                        result => result.map_err(|e| format!("NTFS record {index}: {e}"))?,
+                    };
+                    if let Some(record) = parsed {
+                        reader
+                            .validate_parsed(&record)
+                            .map_err(|e| format!("NTFS record {index}: {e}"))?;
                         if record.base != 0 {
                             extensions.push(record);
                         } else {
@@ -63,15 +87,23 @@ fn read_index(
                             records.push(record);
                         }
                     }
+                } else {
+                    reader.validate_record(index, raw)?;
                 }
-            } else if raw.iter().any(|&b| b != 0) {
-                return Err(format!("Unrecognized NTFS record at index {index}"));
+            } else {
+                reader.validate_record(index, raw)?;
+                if raw.iter().any(|&b| b != 0) {
+                    return Err(format!("Unrecognized NTFS record at index {index}"));
+                }
             }
             index += 1;
         }
         consumed += len as u64;
         progress.metadata_bytes.store(consumed, Ordering::Relaxed);
         progress.mft_records.store(index as u64, Ordering::Relaxed);
+    }
+    if !progress.cancelled() {
+        reader.finish_validation()?;
     }
     let read_seconds = started.elapsed().as_secs_f64();
     progress.phase.store(2, Ordering::Relaxed);
@@ -157,9 +189,14 @@ pub fn scan_volume(root: &Path, progress: &Progress) -> Result<Scan, String> {
     let volume_serial = super::windows::handle_identity(&root_handle)
         .map_err(|e| format!("Cannot verify NTFS volume identity: {e}"))?
         .0;
-    let (geometry, mapping) = source::volume_mapping(&mut volume)?;
-    let reader = source::MappedReader::new(&mut volume, mapping, geometry.cluster, geometry.valid)?;
-    let mut scan = read_index(reader, &root, geometry, progress, "Experimental NTFS MFT")?;
+    let (geometry, mapping) = match source::volume_mapping(&mut volume, progress) {
+        Err(_) if progress.cancelled() => {
+            return tree::build(&root, vec![], progress, "Experimental NTFS MFT");
+        }
+        result => result?,
+    };
+    let reader = source::MappedReader::with_bootstrap(&mut volume, mapping, geometry)?;
+    let mut scan = read_index_resolved(reader, &root, geometry, progress, "Experimental NTFS MFT")?;
     scan.stats.volume_serial = Some(volume_serial);
     scan.stats.runtime = crate::model::RuntimeState::new(if scan.stats.cancelled {
         crate::model::Provenance::Incomplete

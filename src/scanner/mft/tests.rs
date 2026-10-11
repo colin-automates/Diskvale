@@ -783,6 +783,7 @@ fn fragmented_mft_bootstrap_resolves_attribute_list_extension_once() {
         &first,
         geometry(16384),
         100,
+        &Progress::default(),
         |_, r| {
             assert_eq!(r, reference(42));
             queries += 1;
@@ -792,7 +793,7 @@ fn fragmented_mft_bootstrap_resolves_attribute_list_extension_once() {
     .unwrap();
     assert_eq!(queries, 1);
     assert_eq!(
-        result,
+        result.runs,
         vec![
             Run {
                 lcn: Some(10),
@@ -812,6 +813,7 @@ fn fragmented_mft_bootstrap_resolves_attribute_list_extension_once() {
             &first,
             geometry(16384),
             100,
+            &Progress::default(),
             |_, _| Ok(reused.clone())
         )
         .is_err()
@@ -865,10 +867,675 @@ fn nonresident_attribute_list_reads_whole_sectors_not_its_logical_tail() {
         &first,
         geometry(16384),
         100,
+        &Progress::default(),
         |_, _| Ok(extension.clone()),
     )
     .unwrap();
-    assert_eq!(result.len(), 2);
+    assert_eq!(result.runs.len(), 2);
+}
+
+// A volume-backed fixture: record zero and its extension are in fragmented MFT
+// storage, while the attribute-list bytes are outside the MFT stream.
+fn external_list_volume() -> (Vec<u8>, Geometry) {
+    let mut mft = fixture();
+    let mut name = filename(5, "$MFT", 1);
+    put16(&mut name, 14, 1);
+    let mut data = nonresident("", 65536, 65536, 0, 0, 1, &[0x11, 2, 10, 0]);
+    put16(&mut data, 14, 2);
+    let mut list = vec![0; 96];
+    for (off, typ, vcn, owner, instance) in [
+        (0, 0x30, 0, 0, 1),
+        (32, 0x80, 0, 0, 2),
+        (64, 0x80, 2, 42, 4),
+    ] {
+        put32(&mut list, off, typ);
+        put16(&mut list, off + 4, 32);
+        put64(&mut list, off + 8, vcn);
+        put64(&mut list, off + 16, reference(owner));
+        put16(&mut list, off + 24, instance);
+    }
+    let mut list_attr = nonresident("", list.len() as u64, 4096, 0, 0, 0, &[0x11, 1, 5, 0]);
+    put32(&mut list_attr, 0, 0x20);
+    put16(&mut list_attr, 14, 3);
+    mft[..1024].copy_from_slice(&record(0, false, 0, vec![list_attr, name, data]));
+    let mut continuation = nonresident("", 0, 0, 0, 2, 15, &[0x11, 14, 20, 0]);
+    put16(&mut continuation, 14, 4);
+    mft[42 * 1024..43 * 1024].copy_from_slice(&record(42, false, reference(0), vec![continuation]));
+    let mut volume = vec![0; 100 * 4096];
+    volume[5 * 4096..5 * 4096 + list.len()].copy_from_slice(&list);
+    volume[10 * 4096..12 * 4096].copy_from_slice(&mft[..8192]);
+    volume[20 * 4096..34 * 4096].copy_from_slice(&mft[8192..]);
+    let mut geometry = geometry(mft.len());
+    geometry.total_clusters = Some(100);
+    (volume, geometry)
+}
+
+fn fixture_record_offset(index: usize) -> usize {
+    let logical = index * 1024;
+    if logical < 8192 {
+        10 * 4096 + logical
+    } else {
+        20 * 4096 + logical - 8192
+    }
+}
+
+fn scan_external_list_volume(volume: Vec<u8>, geometry: Geometry) -> Result<Scan, String> {
+    let mut disk = Cursor::new(volume);
+    let progress = Progress::default();
+    let mapping = bootstrap_fixture(&mut disk, geometry, &progress)?;
+    scan_volume_fixture(&mut disk, mapping, geometry, &progress)
+}
+
+fn bootstrap_fixture<R: Read + std::io::Seek>(
+    disk: &mut R,
+    geometry: Geometry,
+    progress: &Progress,
+) -> Result<Bootstrap, String> {
+    use std::io::SeekFrom;
+    disk.seek(SeekFrom::Start(fixture_record_offset(0) as u64))
+        .unwrap();
+    let mut first = vec![0; geometry.record_size];
+    disk.read_exact(&mut first).unwrap();
+    fixup(&mut first, geometry.sector, false)?;
+    let mapping = mapping_from_record(disk, &first, geometry, 100, progress, |disk, reference| {
+        disk.seek(SeekFrom::Start(
+            fixture_record_offset(slot(reference)) as u64
+        ))
+        .map_err(|e| e.to_string())?;
+        let mut raw = vec![0; geometry.record_size];
+        disk.read_exact(&mut raw).map_err(|e| e.to_string())?;
+        Ok(raw)
+    })?;
+    Ok(mapping)
+}
+
+fn scan_volume_fixture<R: Read + std::io::Seek>(
+    disk: &mut R,
+    mapping: Bootstrap,
+    geometry: Geometry,
+    progress: &Progress,
+) -> Result<Scan, String> {
+    let reader = MappedReader::with_bootstrap(disk, mapping, geometry)?;
+    read_index_resolved(
+        reader,
+        Path::new("C:\\synthetic-fixture"),
+        geometry,
+        progress,
+        "Volume fixture",
+    )
+}
+
+#[test]
+fn volume_backed_nonresident_record_zero_list_completes_full_pipeline() {
+    let (volume, geometry) = external_list_volume();
+    let scan = scan_external_list_volume(volume, geometry).unwrap();
+    assert_eq!(scan.stats.mft_records, 64);
+    assert_eq!(
+        (
+            scan.stats.files,
+            scan.stats.folders,
+            scan.stats.shared_links
+        ),
+        (10, 3, 1)
+    );
+    assert_eq!(
+        (scan.nodes[0].logical, scan.nodes[0].allocated),
+        (1141328, 94208)
+    );
+    assert_eq!(
+        scan.nodes.iter().filter(|node| node.name == "$MFT").count(),
+        1
+    );
+    assert!(!scan.stats.cancelled);
+}
+
+fn list_entry(typ: u32, name: &str, vcn: u64, owner: u64, instance: u16) -> Vec<u8> {
+    let utf: Vec<_> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut entry = vec![0; (26 + utf.len()).next_multiple_of(8)];
+    let len = entry.len();
+    put32(&mut entry, 0, typ);
+    put16(&mut entry, 4, len as u16);
+    entry[6] = (utf.len() / 2) as u8;
+    entry[7] = 26;
+    put64(&mut entry, 8, vcn);
+    put64(&mut entry, 16, reference(owner));
+    put16(&mut entry, 24, instance);
+    entry[26..26 + utf.len()].copy_from_slice(&utf);
+    entry
+}
+
+fn external_list_attr(logical: usize, pairs: &[u8], clusters: u64) -> Vec<u8> {
+    let mut attr = nonresident(
+        "",
+        logical as u64,
+        clusters * 4096,
+        0,
+        0,
+        clusters - 1,
+        pairs,
+    );
+    put32(&mut attr, 0, 0x20);
+    put16(&mut attr, 14, 2);
+    attr
+}
+
+fn put_volume_record(volume: &mut [u8], index: usize, raw: &[u8]) {
+    let offset = fixture_record_offset(index);
+    volume[offset..offset + 1024].copy_from_slice(raw);
+}
+
+// Two required attributes share one extension. The larger variation spans two
+// nonadjacent clusters and ends mid-sector, with distinct named attributes.
+fn add_external_file_list(volume: &mut [u8], fragmented: bool) -> usize {
+    let mut main = nonresident("", 5000, 8192, 0, 0, 1, &[0x11, 2, 60, 0]);
+    put16(&mut main, 14, 1);
+    let mut list = list_entry(0x30, "", 0, 25, 1);
+    list.extend(list_entry(0x80, "", 0, 26, 1));
+    if fragmented {
+        let owners = [26, 40, 41, 43, 44, 45];
+        for (group, owner) in owners.into_iter().enumerate() {
+            let mut attrs = if group == 0 {
+                vec![main.clone()]
+            } else {
+                Vec::new()
+            };
+            for part in 0..20 {
+                let name = format!("s{:03}", group * 20 + part);
+                let instance = (part + 2) as u16;
+                let mut attr = resident_attr(0x80, &name, &[]);
+                put16(&mut attr, 14, instance);
+                attrs.push(attr);
+                list.extend(list_entry(0x80, &name, 0, owner, instance));
+            }
+            put_volume_record(
+                volume,
+                owner as usize,
+                &record(owner, false, reference(25), attrs),
+            );
+        }
+        assert!(list.len() > 4096 && list.len() < 8192 && !list.len().is_multiple_of(512));
+        volume[6 * 4096..7 * 4096].copy_from_slice(&list[..4096]);
+        volume[8 * 4096..8 * 4096 + list.len() - 4096].copy_from_slice(&list[4096..]);
+    } else {
+        let mut named = resident_attr(0x80, "extra", b"abc");
+        put16(&mut named, 14, 2);
+        put_volume_record(
+            volume,
+            26,
+            &record(26, false, reference(25), vec![main, named]),
+        );
+        list.extend(list_entry(0x80, "extra", 0, 26, 2));
+        volume[6 * 4096..6 * 4096 + list.len()].copy_from_slice(&list);
+    }
+    let attr = if fragmented {
+        external_list_attr(list.len(), &[0x11, 1, 6, 0x11, 1, 2, 0], 2)
+    } else {
+        external_list_attr(list.len(), &[0x11, 1, 6, 0], 1)
+    };
+    let mut name = filename(30, "extended.gz", 1);
+    put16(&mut name, 14, 1);
+    put_volume_record(volume, 25, &record(25, false, 0, vec![attr, name]));
+    list.len()
+}
+
+#[test]
+fn ordinary_nonresident_lists_resolve_fragmented_storage_without_double_merging() {
+    for fragmented in [false, true] {
+        let (mut volume, geometry) = external_list_volume();
+        add_external_file_list(&mut volume, fragmented);
+        let scan = scan_external_list_volume(volume, geometry).unwrap();
+        assert_eq!(
+            (scan.nodes[0].logical, scan.nodes[0].allocated),
+            (1141328, 94208)
+        );
+        assert_eq!((scan.stats.files, scan.stats.shared_links), (10, 1));
+        let file = scan
+            .nodes
+            .iter()
+            .find(|node| node.name == "extended.gz")
+            .unwrap();
+        assert_eq!((file.logical, file.allocated), (5000, 8192));
+        assert_eq!(file.named_logical, if fragmented { 0 } else { 3 });
+        assert_eq!(scan.stats.mft_records, 64);
+    }
+}
+
+#[test]
+fn directory_nonresident_list_uses_the_same_resolver_and_stream_bucket() {
+    let (mut volume, geometry) = external_list_volume();
+    let mut list = list_entry(0x30, "", 0, 30, 0);
+    list.extend(list_entry(0x80, "named", 0, 45, 1));
+    volume[7 * 4096..7 * 4096 + list.len()].copy_from_slice(&list);
+    let mut data = nonresident("named", 100, 4096, 0, 0, 0, &[0x11, 1, 90, 0]);
+    put16(&mut data, 14, 1);
+    put_volume_record(
+        &mut volume,
+        45,
+        &record(45, true, reference(30), vec![data]),
+    );
+    put_volume_record(
+        &mut volume,
+        30,
+        &record(
+            30,
+            true,
+            0,
+            vec![
+                external_list_attr(list.len(), &[0x11, 1, 7, 0], 1),
+                filename(31, "Artifacts", 1),
+            ],
+        ),
+    );
+    let scan = scan_external_list_volume(volume, geometry).unwrap();
+    assert_eq!(scan.nodes[0].allocated, 94208 + 4096);
+    let folder = scan
+        .nodes
+        .iter()
+        .find(|node| node.name == "Artifacts")
+        .unwrap();
+    assert_eq!((folder.own_logical, folder.own_allocated), (100, 4096));
+    assert_eq!(scan.nodes.iter().filter(|node| node.synthetic).count(), 1);
+}
+
+#[test]
+fn external_required_entries_reject_wrong_type_name_instance_vcn_or_reference() {
+    for defect in [
+        "type",
+        "name",
+        "instance",
+        "vcn",
+        "reference",
+        "sequence",
+        "owner",
+        "missing",
+    ] {
+        let (mut volume, geometry) = external_list_volume();
+        add_external_file_list(&mut volume, false);
+        let list = 6 * 4096 + 32;
+        let extension = fixture_record_offset(26);
+        match defect {
+            "type" => put32(&mut volume, list, 0x10),
+            "name" => put16(&mut volume, list + 32 + 26, b'x' as u16),
+            "instance" => put16(&mut volume, list + 24, 9),
+            "vcn" => put64(&mut volume, list + 8, 1),
+            "reference" => put64(&mut volume, list + 16, reference(27)),
+            "sequence" => put16(&mut volume, extension + 16, 2),
+            "owner" => put64(&mut volume, extension + 32, reference(27)),
+            "missing" => volume[extension..extension + 1024].fill(0),
+            _ => unreachable!(),
+        }
+        assert!(
+            scan_external_list_volume(volume, geometry).is_err(),
+            "accepted {defect}"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_metadata_is_rechecked_against_bulk_records_and_fresh_list_bytes() {
+    for defect in [
+        "base_sequence",
+        "base_mapping",
+        "extension_sequence",
+        "extension_mapping",
+        "extension_missing",
+        "external_list",
+    ] {
+        let (volume, geometry) = external_list_volume();
+        let progress = Progress::default();
+        let mut disk = Cursor::new(volume);
+        let mapping = bootstrap_fixture(&mut disk, geometry, &progress).unwrap();
+        let volume = disk.get_mut();
+        match defect {
+            "base_sequence" => put16(volume, fixture_record_offset(0) + 16, 2),
+            "base_mapping" => {
+                let mut raw = record(
+                    0,
+                    false,
+                    0,
+                    vec![
+                        filename(5, "$MFT", 1),
+                        nonresident("", 65536, 65536, 0, 0, 15, &[0x11, 16, 11, 0]),
+                    ],
+                );
+                // Same slot and sequence, but a different mapping/list layout.
+                put_volume_record(volume, 0, &raw);
+                raw.clear();
+            }
+            "extension_sequence" => put16(volume, fixture_record_offset(42) + 16, 2),
+            "extension_mapping" => {
+                let mut attr = nonresident("", 0, 0, 0, 2, 15, &[0x11, 14, 21, 0]);
+                put16(&mut attr, 14, 4);
+                put_volume_record(volume, 42, &record(42, false, reference(0), vec![attr]));
+            }
+            "extension_missing" => {
+                let start = fixture_record_offset(42);
+                volume[start..start + 1024].fill(0);
+            }
+            "external_list" => put16(volume, 5 * 4096 + 24, 9),
+            _ => unreachable!(),
+        }
+        let error = scan_volume_fixture(&mut disk, mapping, geometry, &progress).unwrap_err();
+        assert!(error.contains("bootstrap"), "{defect}: {error}");
+    }
+}
+
+#[test]
+fn external_list_lengths_mapping_bounds_and_truncation_fail_closed() {
+    for defect in [
+        "oversized",
+        "short_initialized",
+        "short_allocation",
+        "out_of_volume",
+        "missing_coverage",
+        "sparse",
+        "compressed",
+        "empty_bytes",
+        "truncated_entries",
+        "truncated",
+    ] {
+        let (mut volume, geometry) = external_list_volume();
+        let len = add_external_file_list(&mut volume, false);
+        let mut attr = external_list_attr(len, &[0x11, 1, 6, 0], 1);
+        match defect {
+            "oversized" => put64(&mut attr, 48, 16 * 1024 * 1024 + 1),
+            "short_initialized" => put64(&mut attr, 56, len as u64 - 1),
+            "short_allocation" => put64(&mut attr, 40, 0),
+            "out_of_volume" => attr = external_list_attr(len, &[0x11, 1, 100, 0], 1),
+            "missing_coverage" => put64(&mut attr, 24, 1),
+            "sparse" => attr = external_list_attr(len, &[0x01, 1, 0], 1),
+            "compressed" => put16(&mut attr, 12, 1),
+            "empty_bytes" => volume[6 * 4096..7 * 4096].fill(0),
+            "truncated_entries" => put16(&mut volume, 6 * 4096 + 4, (len + 8) as u16),
+            "truncated" => {
+                attr = external_list_attr(len, &[0x11, 1, 80, 0], 1);
+                volume[80 * 4096..80 * 4096 + len].copy_from_slice(
+                    &list_entry(0x30, "", 0, 25, 1)
+                        .into_iter()
+                        .chain(list_entry(0x80, "", 0, 26, 1))
+                        .chain(list_entry(0x80, "extra", 0, 26, 2))
+                        .collect::<Vec<_>>(),
+                );
+                volume.truncate(80 * 4096 + 10);
+            }
+            _ => unreachable!(),
+        }
+        put_volume_record(
+            &mut volume,
+            25,
+            &record(25, false, 0, vec![filename(30, "extended.gz", 1), attr]),
+        );
+        assert!(
+            scan_external_list_volume(volume, geometry).is_err(),
+            "accepted {defect}"
+        );
+    }
+}
+
+struct SectorVolume<'a> {
+    disk: Cursor<Vec<u8>>,
+    progress: &'a Progress,
+    list_reads: usize,
+    cancel_second_list_read: bool,
+}
+impl Read for SectorVolume<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        assert!(bytes.len().is_multiple_of(512), "unaligned read length");
+        assert!(
+            self.disk.position().is_multiple_of(512),
+            "unaligned read offset"
+        );
+        if self.disk.position() == 5 * 4096 {
+            self.list_reads += 1;
+            if self.cancel_second_list_read && self.list_reads == 2 {
+                self.progress.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.disk.read(bytes)
+    }
+}
+impl std::io::Seek for SectorVolume<'_> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.disk.seek(position)
+    }
+}
+
+#[test]
+fn fragmented_external_list_reads_are_sector_aligned_through_bulk_pipeline() {
+    let (mut volume, geometry) = external_list_volume();
+    let len = add_external_file_list(&mut volume, true);
+    // Padding beyond logical EOF must never be interpreted as list entries.
+    volume[8 * 4096 + len - 4096..9 * 4096].fill(0xff);
+    let progress = Progress::default();
+    let mut disk = SectorVolume {
+        disk: Cursor::new(volume),
+        progress: &progress,
+        list_reads: 0,
+        cancel_second_list_read: false,
+    };
+    let mapping = bootstrap_fixture(&mut disk, geometry, &progress).unwrap();
+    let scan = scan_volume_fixture(&mut disk, mapping, geometry, &progress).unwrap();
+    assert_eq!(scan.nodes[0].allocated, 94208);
+    assert_eq!(disk.list_reads, 2); // bootstrap plus fresh bulk validation
+}
+
+#[test]
+fn metadata_reads_restore_the_sequential_cursor_on_success_and_failure() {
+    use super::source::IndexSource;
+    let (volume, geometry) = external_list_volume();
+    let progress = Progress::default();
+    let mut disk = Cursor::new(volume);
+    let expected = [
+        disk.get_ref()[10 * 4096..12 * 4096].to_vec(),
+        disk.get_ref()[20 * 4096..34 * 4096].to_vec(),
+    ]
+    .concat();
+    let mut first =
+        disk.get_ref()[fixture_record_offset(0)..fixture_record_offset(0) + 1024].to_vec();
+    fixup(&mut first, 512, false).unwrap();
+    let attrs = attributes(&first).unwrap();
+    let list = attrs
+        .iter()
+        .find(|attr| u32_at(attr, 0) == Some(0x20))
+        .unwrap();
+    let mapping = vec![
+        Run {
+            lcn: Some(10),
+            clusters: 2,
+        },
+        Run {
+            lcn: Some(20),
+            clusters: 14,
+        },
+    ];
+    let mut reader = MappedReader::new(&mut disk, mapping, 4096, 65536).unwrap();
+    let mut prefix = vec![0; 1024];
+    reader.read_exact(&mut prefix).unwrap();
+    reader.resolve_list(list, geometry, &progress).unwrap();
+    let mut invalid = external_list_attr(32, &[0x11, 1, 7, 0], 1); // zero bytes
+    assert!(reader.resolve_list(&invalid, geometry, &progress).is_err());
+    put64(&mut invalid, 48, 0);
+    assert!(reader.resolve_list(&invalid, geometry, &progress).is_err());
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).unwrap();
+    // Slot 3 and the later root/file records prove continuation of both runs.
+    let mut flat = prefix;
+    flat.extend(rest);
+    assert_eq!(flat, expected);
+    assert_eq!(&flat[3 * 1024..3 * 1024 + 4], b"FILE");
+    let scan = read_index(
+        Cursor::new(flat),
+        Path::new("C:\\fixture"),
+        geometry,
+        &progress,
+        "flat",
+    );
+    assert!(scan.unwrap_err().contains("external volume clusters"));
+}
+
+#[test]
+fn cancellation_during_external_resolution_produces_partial_read_only_result() {
+    let (volume, geometry) = external_list_volume();
+    let progress = Progress::default();
+    let mut disk = SectorVolume {
+        disk: Cursor::new(volume),
+        progress: &progress,
+        list_reads: 0,
+        cancel_second_list_read: true,
+    };
+    let mapping = bootstrap_fixture(&mut disk, geometry, &progress).unwrap();
+    let scan = scan_volume_fixture(&mut disk, mapping, geometry, &progress).unwrap();
+    assert!(scan.stats.cancelled);
+    assert_eq!(
+        scan.stats.runtime.provenance(),
+        crate::model::Provenance::Incomplete
+    );
+    assert!(!scan.deletion_eligible());
+    assert!(crate::recycle::Target::from_scan(&scan, 0).is_err());
+    let (volume, geometry) = external_list_volume();
+    assert!(
+        bootstrap_fixture(&mut Cursor::new(volume), geometry, &progress)
+            .unwrap_err()
+            .contains("cancelled")
+    );
+}
+
+#[test]
+fn external_reads_do_not_corrupt_the_next_eight_megabyte_bulk_chunk() {
+    use std::io::{Seek, SeekFrom};
+    let (mut volume, mut geometry) = external_list_volume();
+    add_external_file_list(&mut volume, false);
+    let list_bytes = volume[5 * 4096..7 * 4096].to_vec();
+    let mut flat = [
+        volume[10 * 4096..12 * 4096].to_vec(),
+        volume[20 * 4096..34 * 4096].to_vec(),
+    ]
+    .concat();
+    flat.resize(CHUNK_BYTES + 65536, 0);
+    let clusters = flat.len() / 4096;
+    let mut data = nonresident(
+        "",
+        flat.len() as u64,
+        flat.len() as u64,
+        0,
+        0,
+        1,
+        &[0x11, 2, 10, 0],
+    );
+    put16(&mut data, 14, 2);
+    let mut name = filename(5, "$MFT", 1);
+    put16(&mut name, 14, 1);
+    let mut list = external_list_attr(96, &[0x11, 1, 5, 0], 1);
+    put16(&mut list, 14, 3);
+    flat[..1024].copy_from_slice(&record(0, false, 0, vec![list, name, data]));
+    let count = (clusters - 2) as u16;
+    let mut extension = nonresident(
+        "",
+        0,
+        0,
+        0,
+        2,
+        clusters as u64 - 1,
+        &[0x12, count as u8, (count >> 8) as u8, 100, 0],
+    );
+    put16(&mut extension, 14, 4);
+    flat[42 * 1024..43 * 1024].copy_from_slice(&record(42, false, reference(0), vec![extension]));
+    flat[8193 * 1024..8194 * 1024].copy_from_slice(&record(
+        8193,
+        false,
+        0,
+        vec![
+            filename(5, "after-chunk.txt", 1),
+            resident_attr(0x80, "", b"abc"),
+        ],
+    ));
+    let total = 100 + clusters;
+    let mut volume = vec![0; total * 4096];
+    volume[5 * 4096..7 * 4096].copy_from_slice(&list_bytes);
+    volume[10 * 4096..12 * 4096].copy_from_slice(&flat[..8192]);
+    volume[100 * 4096..100 * 4096 + flat.len() - 8192].copy_from_slice(&flat[8192..]);
+    geometry.valid = flat.len() as u64;
+    geometry.total_clusters = Some(total as u64);
+    let progress = Progress::default();
+    let mut disk = SectorVolume {
+        disk: Cursor::new(volume),
+        progress: &progress,
+        list_reads: 0,
+        cancel_second_list_read: false,
+    };
+    let mut first = flat[..1024].to_vec();
+    fixup(&mut first, 512, false).unwrap();
+    let mapping = mapping_from_record(
+        &mut disk,
+        &first,
+        geometry,
+        total as u64,
+        &progress,
+        |disk, reference| {
+            let offset = 100 * 4096 + slot(reference) * 1024 - 8192;
+            disk.seek(SeekFrom::Start(offset as u64))
+                .map_err(|e| e.to_string())?;
+            let mut raw = vec![0; 1024];
+            disk.read_exact(&mut raw).map_err(|e| e.to_string())?;
+            Ok(raw)
+        },
+    )
+    .unwrap();
+    let scan = scan_volume_fixture(&mut disk, mapping, geometry, &progress).unwrap();
+    assert_eq!(scan.stats.mft_records, 8256);
+    assert_eq!(scan.stats.files, 11);
+    assert!(scan.nodes.iter().any(|node| node.name == "after-chunk.txt"));
+    assert_eq!(scan.nodes[0].allocated, 94208 + CHUNK_BYTES as u64);
+    assert_eq!(scan.nodes[0].logical, 1141328 + CHUNK_BYTES as u64 + 3);
+}
+
+#[test]
+fn flat_replay_cannot_fetch_external_lists_from_the_displayed_drive() {
+    let (mut volume, _) = external_list_volume();
+    add_external_file_list(&mut volume, false);
+    let mut flat = fixture(); // record-zero geometry is inferable without external bytes
+    let offset = fixture_record_offset(25);
+    flat[25 * 1024..26 * 1024].copy_from_slice(&volume[offset..offset + 1024]);
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut file, &flat).unwrap();
+    let error = scan_file(Path::new("C:\\"), file.path(), &Progress::default()).unwrap_err();
+    assert!(
+        error.contains("flat saved MFT") && error.contains("external volume clusters"),
+        "{error}"
+    );
+    let offset = fixture_record_offset(0);
+    flat[..1024].copy_from_slice(&volume[offset..offset + 1024]);
+    std::fs::write(file.path(), flat).unwrap();
+    let error = scan_file(Path::new("C:\\"), file.path(), &Progress::default()).unwrap_err();
+    assert!(
+        error.contains("record-zero attribute list") && error.contains("external volume clusters"),
+        "{error}"
+    );
+}
+
+#[test]
+fn resolved_list_snapshot_and_csv_round_trip_does_not_preserve_deletion_authority() {
+    let (mut volume, geometry) = external_list_volume();
+    add_external_file_list(&mut volume, false);
+    let mut scan = scan_external_list_volume(volume, geometry).unwrap();
+    scan.stats.volume_serial = Some(123);
+    scan.stats.runtime = crate::model::RuntimeState::new(crate::model::Provenance::Live);
+    assert!(scan.deletion_eligible());
+    let output = tempfile::tempdir().unwrap();
+    let snapshot = output.path().join("synthetic.json");
+    crate::output::snapshot(&scan, &snapshot, &Progress::default()).unwrap();
+    let loaded: Scan = serde_json::from_slice(&std::fs::read(snapshot).unwrap()).unwrap();
+    assert_eq!(loaded.nodes[0].allocated, 94208);
+    assert_eq!(
+        loaded.stats.runtime.provenance(),
+        crate::model::Provenance::Snapshot
+    );
+    assert!(!loaded.deletion_eligible());
+    assert!(crate::recycle::Target::from_scan(&loaded, 1).is_err());
+    let csv = output.path().join("synthetic.csv");
+    crate::output::csv(&loaded, &csv, &Progress::default()).unwrap();
+    let mut rows = csv::Reader::from_path(csv).unwrap();
+    assert_eq!(rows.records().count(), loaded.nodes.len());
 }
 #[test]
 fn rejects_reused_parent_and_extension_references() {

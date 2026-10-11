@@ -181,7 +181,7 @@ pub(super) fn attribute_name(attr: &[u8]) -> Result<String, String> {
             .ok_or("Invalid stream name bounds")?,
     )
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ListEntry {
     pub typ: u32,
     pub vcn: u64,
@@ -307,11 +307,8 @@ impl Record {
         Ok(())
     }
     pub fn finalize_streams(&mut self, cancelled: bool) -> Result<(), String> {
-        if self
-            .required
-            .iter()
-            .any(|entry| !self.present.contains(entry))
-        {
+        let present: HashSet<_> = self.present.iter().collect();
+        if self.required.iter().any(|entry| !present.contains(entry)) {
             if !cancelled {
                 return Err("Missing or mismatched listed NTFS attribute".into());
             }
@@ -418,11 +415,27 @@ impl Record {
             .dedup_by(|a, b| a.parent == b.parent && a.text == b.text);
     }
 }
+#[cfg(test)]
 pub(super) fn parse(
     raw: &[u8],
     index: u64,
     cluster: u64,
     total_clusters: Option<u64>,
+) -> Result<Option<Record>, String> {
+    parse_with_lists(raw, index, cluster, total_clusters, |_| {
+        Err(
+            "Unsupported nonresident attribute list: external volume metadata is unavailable"
+                .into(),
+        )
+    })
+}
+
+pub(super) fn parse_with_lists(
+    raw: &[u8],
+    index: u64,
+    cluster: u64,
+    total_clusters: Option<u64>,
+    mut resolve_list: impl FnMut(&[u8]) -> Result<Vec<ListEntry>, String>,
 ) -> Result<Option<Record>, String> {
     let flags = u16_at(raw, 22).ok_or("Missing record flags")?;
     if flags & 1 == 0 {
@@ -469,7 +482,7 @@ pub(super) fn parse(
                 if attr[8] == 0 {
                     record.required.extend(attribute_list(resident(attr)?)?);
                 } else {
-                    return Err("Unsupported nonresident attribute list in bulk NTFS record; completeness cannot be verified".into());
+                    record.required.extend(resolve_list(attr)?);
                 }
             }
             0x30 => {
