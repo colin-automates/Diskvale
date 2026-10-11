@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import struct
 import sys
+import xml.etree.ElementTree as ET
 
 
 def main():
@@ -86,6 +87,10 @@ def main():
             frames.append(width)
         assert frames == [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
         version = resource(16)
+        levels = ET.fromstring(resource(24)).findall(".//{*}requestedExecutionLevel")
+        assert len(levels) == 1
+        assert levels[0].get("level") == "requireAdministrator"
+        assert levels[0].get("uiAccess") == "false"
     finally:
         kernel.FreeLibrary(module)
 
@@ -129,6 +134,7 @@ def main():
         "windows_large_and_small_icon_extraction": "passed",
         "windows_icons_extracted": extracted,
         "version_info": values,
+        "requested_execution_level": levels[0].attrib,
         "imported_windows_libraries": sorted(imports),
         "separate_visual_cpp_runtime_required": False,
         "application_executed": False,

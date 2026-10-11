@@ -42,5 +42,9 @@ jobs:
           name: Diskvale-windows-x64
           path: |
             artifacts/release/Diskvale-windows-x64.zip
+            artifacts/release/Diskvale.exe
             artifacts/release/SHA256SUMS.txt
+            artifacts/release/BUILD_INFO.json
+            artifacts/release/THIRD_PARTY_NOTICES.txt
+            artifacts/release/Diskvale-Demo.mp4
           if-no-files-found: error

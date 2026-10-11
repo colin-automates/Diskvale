@@ -3,154 +3,64 @@
   <img src="assets/brand/diskvale-logo-on-light.png" alt="Diskvale" width="300">
 </picture>
 
-**Disk space, clearly.** An open-source Windows disk explorer built in Rust.
+**An open-source Windows disk explorer that helps you see what is taking up space.**
 
-Diskvale turns an NTFS drive into an interactive map so you can see what takes up space, find large files, and explore folders. It runs locally as a native desktop application.
+Diskvale turns a whole NTFS drive into an interactive map, with large-file lists, file-type totals and search. It runs locally as a native Rust/egui application.
 
-[Download for Windows](https://github.com/colin-automates/Diskvale/releases/latest) · [Watch the 30-second demo](https://colin-automates.github.io/Diskvale/) · [How it works](#how-it-works) · [Build from source](#build-from-source)
+**[Download v0.3.24 for Windows](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale-windows-x64.zip)** · [Release notes](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.24) · [Watch the demo](https://colin-automates.github.io/Diskvale/)
 
-![Diskvale exploring a studio drive](docs/media/diskvale.png)
+**Early preview · Windows 10/11 x64 · NTFS · Administrator required.** The build is unsigned; Windows may show an unknown-publisher warning.
+
+![Diskvale exploring a generated studio drive](docs/media/diskvale.png)
 
 ## Download and run
 
-| Download | What you get |
+| Download v0.3.24 | What you get |
 | --- | --- |
-| [Windows x64 portable ZIP](https://github.com/colin-automates/Diskvale/releases/latest/download/Diskvale-windows-x64.zip) | Diskvale.exe, a quick-start guide, MIT license, and third-party notices. Recommended. |
-| [Diskvale.exe](https://github.com/colin-automates/Diskvale/releases/latest/download/Diskvale.exe) | Standalone application, with no installer. |
-| [Source ZIP](https://github.com/colin-automates/Diskvale/archive/refs/heads/main.zip) | Full project source, tests, assets, documentation, and demo tooling. Each release also has source archives for its exact version. |
+| [Windows x64 portable ZIP](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale-windows-x64.zip) | Recommended: Diskvale.exe, quick-start guide, build provenance, MIT license and third-party notices. |
+| [Diskvale.exe](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale.exe) | Standalone application, with no installer. |
+| [SHA-256 checksums](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/SHA256SUMS.txt) | Checksums for the exact release assets. |
+| [Source for this version](https://github.com/colin-automates/Diskvale/archive/refs/tags/v0.3.24.zip) | Source, tests, artwork and documentation at the release tag. |
 
-1. Download the portable ZIP and extract it.
+1. Download the ZIP and extract it into a folder.
 2. Open `Diskvale.exe` and approve the Windows administrator prompt.
-3. Select an NTFS drive and click **Scan**. Use **Rescan** to refresh existing results.
+3. Select an NTFS drive and click **Scan**. Launching does not start a scan automatically.
+4. Explore **Map**, **Files** and **Types**. Use **Rescan** to refresh results.
 
-Requires **Windows 10/11 x64**, an **NTFS drive**, and **administrator access** to read the NTFS index. Launching the app does not automatically scan a drive. No Rust, Python, Node.js, browser, or separate Visual C++ runtime installation is needed to run the downloaded application. Releases are currently unsigned; Windows may show an unknown-publisher warning.
+No Rust, Python, Node.js or separate Visual C++ runtime installation is needed to run the download. Check its version in the Ready status, **Scan notes**, or Windows Properties → Details. `BUILD_INFO.json` identifies the source commit and toolchain. In PowerShell, `Get-FileHash .\Diskvale.exe -Algorithm SHA256` lets you compare the EXE with `SHA256SUMS.txt`.
 
-SHA-256 checksums accompany each release. From PowerShell, `Get-FileHash .\Diskvale.exe -Algorithm SHA256` prints the executable's checksum.
+## What you can do
+
+- **See storage visually:** a nested treemap uses area for size and color for file category. Hover for details; double-click folders and use Backspace, Up or breadcrumbs to return.
+- **Find large files and types:** sort the Files list by size or date; view extension totals in Types. Filters follow you across views and folders.
+- **Search:** combine names, extensions, sizes and ages, such as `ext:mp4 >1GB` or `ext:zip older:1y`. Ctrl+K focuses search. Unicode lowercase matching is consistent across all views.
+- **Save and compare:** save JSON snapshots, export CSV, or compare compatible captures of the same drive. Background jobs show progress, cancellation and errors.
+- **Clean up deliberately:** right-click an individual item and choose **Delete…**, then confirm the exact path. Recycling is the default; refused recycling needs a separate confirmation for permanent deletion. Saved, partial and stale results cannot authorize deletion. Rescan after changes.
+
+Sizes default to decimal GB/MB/KB; binary GiB/MiB/KiB are available. Size filters use the selected metric. See [size accounting, search units, snapshot compatibility and deletion safeguards](docs/technical.md).
+
+## Early-preview limitations
+
+The **experimental NTFS reader** scans whole local NTFS drives. Arbitrary folders, network shares and other filesystems are unsupported; navigating a folder explores the existing drive index. Unsupported or incomplete metadata returns an explicit error rather than silently selecting another scanner. Ordinary nonresident attribute lists currently prevent a complete scan; the MFT-bootstrap reader supports its documented cases.
+
+Large scans can require substantial memory. **Full-volume correctness and performance parity with other disk tools have not been established.** Scans are live metadata reads, not atomic filesystem snapshots. Hard links share allocation, and directory streams and volume overhead have specific accounting rules described in the [technical notes](docs/technical.md). Live USN updates and duplicate-file discovery are not implemented.
+
+Deletion rechecks NTFS and volume identity, rejects reparse paths and holds ancestor handles during the Windows operation. These are **best-effort safeguards**, not atomic or race-free deletion. A folder deletion affects its current contents, including files added since scanning. Permanent deletion cannot be undone. Recycled files still occupy space until the Bin is emptied. Read the [detailed safety limits](docs/technical.md#snapshots-background-work-and-deletion) before using cleanup actions.
 
 ## Demo
 
 [![Play the Diskvale demo](docs/media/demo-poster.png)](https://colin-automates.github.io/Diskvale/)
 
-**[Watch the 30-second video](https://colin-automates.github.io/Diskvale/)** · **[Download the MP4](https://github.com/colin-automates/Diskvale/releases/latest/download/Diskvale-Demo.mp4)**
+[Watch the 30-second video](https://colin-automates.github.io/Diskvale/) · [Download the MP4](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale-Demo.mp4)
 
-The tour uses the actual application UI with a generated studio drive. Demo source and rendering instructions are in [tools/demo-video](tools/demo-video/README.md).
+The screenshot and tour use the actual application with **generated drive data**. File counts and timings shown are illustrative, not real-drive benchmarks. The existing demo shows the same interface; v0.3.24 adds result/preview labels and the fixes in its release notes. [Demo source and rendering instructions](tools/demo-video/README.md).
 
-## What you can do
+## Documentation and feedback
 
-- **Map:** explore a nested treemap where area represents size and color represents file category. Individual files have shaded tiles; grouped files use a textured tile and file-count badge.
-- **Files:** browse the largest files in the current folder and its descendants. Sort by size or modification date.
-- **Types:** see storage totals by extension. Click a color category to isolate it across views.
-- **Search:** combine names, extensions, sizes, and ages. Press **Ctrl+K** to focus search.
-- **Inspect:** hover to see a name, file size, and location. Double-click a folder or press **Enter** to open it; **Backspace**, **Up**, and breadcrumbs navigate back.
-- **Save and compare:** save JSON snapshots, export CSV, and compare against an earlier snapshot of the same drive.
-- **Clean up:** right-click an individual file or folder and choose **Delete…**. Confirm the exact target to move it to the Recycle Bin. If Windows cannot recycle it, a separate confirmation offers permanent deletion. Drive roots and grouped tiles cannot be deleted. Rescan after changes; recycled files still occupy space until the Bin is emptied.
+[How it works and safety details](docs/technical.md) · [Build from source and CLI usage](docs/build.md) · [Contributing](CONTRIBUTING.md) · [Release maintenance](docs/release.md) · [Regression validation](docs/review-fixes-2026-10-10.md)
 
-| Search | Matches |
-| --- | --- |
-| `ext:mp4 >1GB` | MP4 files larger than 1 GB |
-| `archive <500MB` | Names containing “archive”, smaller than 500 MB |
-| `older:1y` | Files last modified more than 365 days ago |
-| `ext:zip newer:30d` | ZIP files modified within the last 30 days |
+**[Report a bug](https://github.com/colin-automates/Diskvale/issues/new?template=bug_report.yml)** with your Diskvale/Windows versions, drive context, reproduction steps and exact redacted error. Snapshots and CSVs contain filenames and paths. Use synthetic samples or redacted screenshots; do not attach full drive captures by default.
 
-Size filters use the selected size metric. GB/MB/KB are decimal; GiB/MiB/KiB are binary. Age units are days (`d`), weeks (`w`), 30-day months (`m`), and 365-day years (`y`). Files without a recorded date do not match age filters. Search terms and extensions use the same Unicode lowercase matching in Map, Files, and Types. Search and category filters follow you into folders.
+## License
 
-## How it works
-
-1. **Read the NTFS index.** Diskvale opens the selected volume for reading and reads its Master File Table in 8 MiB chunks. It validates record boundaries, sector fixups, and file references, and resolves fragmented mappings and attribute-list extensions. It does not walk every file through Explorer or follow reparse targets.
-2. **Build a tree.** Records become an indexed parent/child tree. Logical lengths, allocated data runs, modification times, and hard-link information are collected, then file counts and sizes are aggregated through folders.
-3. **Lay out the map.** A squarified treemap divides the available area into nested rectangles. Small files can be grouped without discarding their bytes. Drawing and pattern geometry have budgets to keep very dense maps manageable.
-4. **Prepare results in the background.** Scanning, filtering, file lists, and extension totals use background work. Cached results and virtualized tables reduce repeated work when switching views. The same search predicate drives the map and tables.
-5. **Keep disk operations explicit.** Scanning reads metadata. Save/export writes only the chosen output file. Deletion is a separate confirmed Windows operation that revalidates the selected target before acting.
-
-### Understanding the sizes
-
-**File size** retains the unnamed stream's logical length for ordinary files. **Size on disk** includes allocated storage from all `$DATA` streams, including named streams. Sparse holes do not count toward allocation; resident data has no separately allocated clusters. Named-stream logical lengths are recorded separately in snapshots and CSV. Multiple hard links share one allocation, assigned to one encountered path, so allocation attributed to an individual folder can depend on the link used.
-
-Directory-owned `$DATA` streams, including on the volume root, appear once in a **Directory streams** bucket. Its logical measure sums those directory streams; its allocated measure counts their physical runs. The bucket participates in Map, Files, Types, search totals, and exports, carries no ordinary file count, and cannot be deleted. Its exported path identifies the owning directory, with `directory_stream_bucket=true`; it never invents a filesystem path. Directory aggregate rows include this bucket and descendants, so sum leaf CSV rows when reconciling the root total.
-
-Directory index allocation and other volume overhead are excluded from file totals. A complete, allocation-known scan with directory-stream accounting and captured capacity/free-space data can show **Outside indexed files** for the remaining used space. A live scan is not an atomic filesystem snapshot, so changes during a scan can affect totals.
-
-### Snapshots, background work, and deletion
-
-Snapshot schema 2 adds NTFS identities and directory-stream accounting. Older snapshots remain readable when their tree and aggregate totals validate. Case-distinct sibling names are preserved when reopening and comparing captures; exact duplicate names remain invalid. Legacy captures retain an explicit warning that directory-stream data was not captured; saving them again does not manufacture that missing data. Comparisons require the same accounting profile. Saved snapshots and saved-MFT replays provide read-only browsing/export and never authorize deletion, regardless of serialized flags or notices.
-
-Save, CSV export, and comparison preparation run in one bounded background job using the current immutable scan. The status bar shows busy/progress/error state and **Cancel job**. Replacement scans cancel the old job; an old comparison is discarded, and completed old outputs identify their originating scan. Native file dialogs stay on the UI thread. Outputs are staged beside the destination, flushed and synced, then replaced without first removing the old output. Cancellation after the replacement commit cannot undo it; this does not guarantee power-loss durability on every filesystem.
-
-Deletion requires a fresh, complete live scan. Diskvale compares the full NTFS reference (including sequence) and volume identity through open handles, rejects reparse targets and paths through them, and holds ancestor handles that deny deletion/rename sharing throughout the Shell operation. The target handle allows Shell deletion, with another check immediately before operation and in the Shell callback. This is a best-effort identity guard: the Shell uses paths, and concurrent target renaming, alias changes, or changes after its callback can still race the operation. It is not atomic deletion of the scanned identity. A deleted or potentially partially changed result revokes all retained deletion targets and requires Rescan. Recycle refusal never automatically starts permanent deletion. Deleting a folder affects its current contents, including files added after scanning.
-
-The sidebar pages direct children in groups of up to 256 while retaining selected ancestry. **More** reaches files and empty directories on later pages, and the last page cycles back; the Files view retains recursive largest-file ordering.
-
-### Current scope
-
-Diskvale is an early release with an **experimental NTFS reader**. The application scans whole NTFS drives; it does not scan arbitrary folders, network shares, or other filesystems. Opening a folder in the map explores the existing drive index. Unsupported or malformed metadata returns an error instead of silently falling back to another scanner. Ordinary records with nonresident attribute lists currently return an explicit unsupported-completeness error, even if a bulk read might recover their extension records. The supported MFT-bootstrap list reader is unchanged. Missing listed attributes, reused references, incomplete terminal stream coverage, and out-of-volume physical extents are rejected; cancelled scans are explicitly partial.
-
-Large drives can require substantial memory. Full-volume correctness and performance parity with other disk tools has not been established. Live USN updates and duplicate-file discovery are not implemented.
-
-## Build from source
-
-Install [Rust through rustup](https://rustup.rs/) and [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio) with **Desktop development with C++** and a **Windows SDK**. `rust-toolchain.toml` selects stable Rust for Windows MSVC; the minimum supported Rust version is 1.88.
-
-```powershell
-git clone https://github.com/colin-automates/Diskvale.git
-cd Diskvale
-powershell -ExecutionPolicy Bypass -File scripts/build_release.ps1
-Copy-Item .\target\x86_64-pc-windows-msvc\release\canopy.exe .\Diskvale.exe
-```
-
-`canopy` is the historical internal crate/binary name. The product, executable branding, and window title are Diskvale. The Windows SDK resource compiler embeds the app icon, version information, and administrator manifest. All application artwork is embedded in the executable.
-
-The release script builds the Windows x64 target with a static C runtime and compiler path remapping. Published executables need no separate Visual C++ runtime and do not contain the build machine's profile or checkout paths. An ordinary local `cargo build --release --locked` also builds the application, but uses Cargo's default runtime linkage.
-
-Builds and ordinary tests work from a standard terminal. Launching the production app, including debug builds, requires administrator access. Use an administrator terminal for `cargo run` or CLI scans.
-
-```powershell
-cargo fmt --all -- --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-```
-
-Tests cover synthetic NTFS records, accounting, queries, layout, cached results, and deletion confirmation/revalidation. Tests that perform Windows deletion on disposable fixtures and the large saved-scan timing check are ignored by default. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-To package a portable release after building:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1
-```
-
-The package, standalone executable, and checksums are written under `artifacts/release/`. Building the application does not require the optional Python/Node demo or artwork tools.
-
-### Command-line examples
-
-From an administrator terminal:
-
-```powershell
-.\Diskvale.exe --path "C:\" --compact
-.\Diskvale.exe --path "C:\" --auto-scan
-.\Diskvale.exe --scan "C:\" --json scan.json --csv files.csv > scan-summary.json
-.\Diskvale.exe --snapshot scan.json --view largest
-```
-
-`--compact` uses a 1050×700 window; `--view largest` and `--view types` choose a results tab. `--focus "Projects"` focuses a relative path within loaded results. The release uses the Windows GUI subsystem; redirect output for headless scans. `--mft-file saved.mft` is a diagnostic parser input; `--snapshot scan.json` opens saved results. The production executable still requires an administrator token for these modes.
-
-## Source layout
-
-| Path | Responsibility |
-| --- | --- |
-| `src/scanner/mft/` | Bulk NTFS reader, record validation, and tree construction |
-| `src/model.rs` | Indexed tree, paths, totals, and scan metadata |
-| `src/treemap.rs` | Squarified nested map layout and grouped tiles |
-| `src/query.rs`, `src/file_types.rs` | Search predicates and color categories |
-| `src/ui.rs`, `src/ui/` | Native egui interface, navigation, tables, and background result caches |
-| `src/recycle.rs` | Confirmed, revalidated Windows recycling/permanent deletion |
-| `src/main.rs`, `build.rs` | Startup, administrator checks, icon, and Windows resources |
-| `tests/`, `examples/` | Regression tests, saved-scan UI preview, and synthetic demo capture |
-| `assets/brand/`, `tools/demo-video/` | Editable branding and reproducible demo production |
-| `scripts/` | Release packaging, resource checks, and license notices |
-
-The legacy filesystem walker in `src/scanner/` is retained for library regression tests; desktop and CLI scan routes use the bulk NTFS reader exclusively. Diskvale is an independent project and does not include WizTree code or binaries.
-
-## License and contributions
-
-Diskvale's original source, branding, and demo are available under the **[MIT license](LICENSE)**. Dependencies and embedded fonts retain their own licenses, recorded in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and included in portable releases.
-
-[Report a bug or suggest a feature](https://github.com/colin-automates/Diskvale/issues), or submit a pull request. For scan bugs, share a minimal synthetic reproduction or redacted diagnostics; scan snapshots and CSVs contain file names and paths.
+Diskvale's original source, branding and demo use the **[MIT license](LICENSE)**. Dependencies and embedded fonts retain their own licenses in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt), included in portable releases. Diskvale is an independent project and includes no WizTree code or binaries.

@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible Diskvale problem with redacted details.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing this early preview. **Snapshots and CSVs contain filenames and paths.** Redact screenshots, errors and sample data before posting. Do not attach full drive snapshots or raw MFT captures by default; prefer a small synthetic reproduction. Never include credentials or personal files.
+  - type: input
+    id: diskvale_version
+    attributes:
+      label: Diskvale version
+      description: See Scan notes, the Ready status, or the executable's Properties > Details. Include the download/tag or source commit if built yourself.
+      placeholder: "0.3.24"
+    validations:
+      required: true
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 x64, version and build from winver"
+    validations:
+      required: true
+  - type: textarea
+    id: drive_context
+    attributes:
+      label: Drive and filesystem context
+      description: NTFS/local drive, approximate capacity and file count, live scan or saved results, administrator access, and relevant compression/sparse/reparse/hard-link details if known. Avoid private paths or serial numbers.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. Open Diskvale…"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and exact error
+      description: Paste redacted error text or attach a redacted screenshot. State whether the scan completed, failed, or was cancelled.
+    validations:
+      required: true

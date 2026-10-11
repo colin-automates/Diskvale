@@ -3,6 +3,9 @@ use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions, vec2};
 
 pub const NAME: &str = "Diskvale";
 pub const WINDOW_TITLE: &str = "Diskvale — Disk Explorer";
+pub const RELEASE_LABEL: &str =
+    concat!("Diskvale v", env!("CARGO_PKG_VERSION"), " · Early preview");
+pub const READY_LABEL: &str = concat!("Ready · v", env!("CARGO_PKG_VERSION"), " · Early preview");
 
 pub fn window_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../../assets/brand/diskvale-app-256.png"))

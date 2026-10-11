@@ -15,10 +15,24 @@ $versionMatch = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"')
 if (-not $versionMatch.Success) { throw 'Cargo package version was not found.' }
 $version = $versionMatch.Groups[1].Value
 if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
-    throw 'Release executable is missing. Run cargo build --release --locked first.'
+    throw 'Release executable is missing. Run scripts/build_release.ps1 from a clean commit first.'
 }
 $binaryVersion = (Get-Item -LiteralPath $Executable).VersionInfo.ProductVersion
 if ($binaryVersion -ne $version) { throw "Executable version $binaryVersion differs from Cargo version $version." }
+$buildInfoPath = Join-Path (Split-Path $Executable) 'BUILD_INFO.json'
+if (-not (Test-Path -LiteralPath $buildInfoPath -PathType Leaf)) { throw 'Build provenance is missing. Run scripts/build_release.ps1 from the clean release commit.' }
+$buildInfo = Get-Content -LiteralPath $buildInfoPath -Raw | ConvertFrom-Json
+$binaryHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant()
+Push-Location $projectRoot
+try {
+    $sourceCommit = git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0) { throw 'Release packaging requires a Git checkout.' }
+    $status = git status --porcelain --untracked-files=normal
+    if ($LASTEXITCODE -ne 0 -or $status) { throw 'Release packaging requires a clean checkout.' }
+} finally { Pop-Location }
+if ($buildInfo.source_commit -ne $sourceCommit -or $buildInfo.version -ne $version -or $buildInfo.executable_sha256 -ne $binaryHash) {
+    throw 'Executable provenance does not match this source commit, version and hash. Rebuild before packaging.'
+}
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $staging = Join-Path $OutputDirectory 'Diskvale'
@@ -27,15 +41,21 @@ foreach ($name in @('LICENSE', 'THIRD_PARTY_NOTICES.txt')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $staging $name) -Force
 }
 Copy-Item -LiteralPath $Executable -Destination (Join-Path $staging 'Diskvale.exe') -Force
+Copy-Item -LiteralPath $buildInfoPath -Destination (Join-Path $staging 'BUILD_INFO.json') -Force
 $quickStart = @"
-Diskvale $version - Disk space, clearly.
+Diskvale $version - Early preview - Disk space, clearly.
+Source commit: $sourceCommit
 
 1. Extract this ZIP into a folder.
 2. Open Diskvale.exe and approve the Windows administrator prompt.
 3. Choose an NTFS drive and click Scan. Use Rescan to refresh the results.
 
-Windows x64 and administrator access are required. No installation is needed.
-This release is unsigned and uses an experimental NTFS reader.
+Windows 10/11 x64, a whole NTFS drive and administrator access are required.
+No installer, development tools or separate Visual C++ runtime are needed.
+This unsigned build may show an unknown-publisher warning. Verify SHA256SUMS.txt.
+The NTFS reader is experimental; unsupported metadata returns an explicit error.
+Large drives may need substantial memory. Full-volume correctness and performance
+parity with other tools have not been established.
 
 Map: explore storage visually. Double-click folders; Backspace goes up.
 Files: find the largest files. Types: see totals by extension.
@@ -43,6 +63,15 @@ Search example: ext:mp4 >1GB. Ctrl+K focuses search.
 
 Delete actions ask you to confirm the exact target. If recycling is refused,
 permanent deletion requires a separate confirmation and cannot be undone.
+Deletion uses best-effort identity checks, not an atomic filesystem operation.
+Saved, partial and stale results cannot authorize deletion. Rescan after changes.
+Snapshots and CSVs contain filenames and paths; redact them before sharing.
+
+This preview and its downloads:
+https://github.com/colin-automates/Diskvale/releases/tag/v$version
+
+Report a problem (include version and redacted reproduction/error text):
+https://github.com/colin-automates/Diskvale/issues/new?template=bug_report.yml
 
 Full source, documentation, updates and demo:
 https://github.com/colin-automates/Diskvale
@@ -52,14 +81,15 @@ Diskvale is MIT licensed. See LICENSE and THIRD_PARTY_NOTICES.txt.
 [IO.File]::WriteAllText((Join-Path $staging 'README.txt'), $quickStart + "`r`n", [Text.UTF8Encoding]::new($false))
 $zip = Join-Path $OutputDirectory 'Diskvale-windows-x64.zip'
 # An explicit list keeps unrelated files from an older staging folder out.
-$packageFiles = @('Diskvale.exe', 'README.txt', 'LICENSE', 'THIRD_PARTY_NOTICES.txt') | ForEach-Object { Join-Path $staging $_ }
+$packageFiles = @('Diskvale.exe', 'README.txt', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'BUILD_INFO.json') | ForEach-Object { Join-Path $staging $_ }
 Compress-Archive -LiteralPath $packageFiles -DestinationPath $zip -Force
 Copy-Item -LiteralPath (Join-Path $staging 'Diskvale.exe') -Destination (Join-Path $OutputDirectory 'Diskvale.exe') -Force
 Copy-Item -LiteralPath (Join-Path $staging 'THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $OutputDirectory 'THIRD_PARTY_NOTICES.txt') -Force
+Copy-Item -LiteralPath $buildInfoPath -Destination (Join-Path $OutputDirectory 'BUILD_INFO.json') -Force
 $demo = Join-Path $projectRoot 'docs/media/diskvale-demo.mp4'
 if (Test-Path -LiteralPath $demo) { Copy-Item -LiteralPath $demo -Destination (Join-Path $OutputDirectory 'Diskvale-Demo.mp4') -Force }
-$downloads = @('Diskvale.exe', 'Diskvale-windows-x64.zip', 'THIRD_PARTY_NOTICES.txt')
-if (Test-Path -LiteralPath (Join-Path $OutputDirectory 'Diskvale-Demo.mp4')) { $downloads += 'Diskvale-Demo.mp4' }
+$downloads = @('Diskvale.exe', 'Diskvale-windows-x64.zip', 'THIRD_PARTY_NOTICES.txt', 'BUILD_INFO.json')
+if (Test-Path -LiteralPath $demo) { $downloads += 'Diskvale-Demo.mp4' }
 $hashes = foreach ($name in $downloads) {
     $hash = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory $name) -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $name"

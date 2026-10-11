@@ -1071,7 +1071,10 @@ impl<R: std::io::Read> std::io::Read for CancellableReader<R> {
 }
 
 fn is_saved_scan(scan: &Scan) -> bool {
-    scan.stats.runtime.provenance() == canopy::model::Provenance::Snapshot
+    matches!(
+        scan.stats.runtime.provenance(),
+        canopy::model::Provenance::Snapshot | canopy::model::Provenance::Replay
+    )
 }
 
 // Launch directly into a folder of a captured or newly completed scan.

@@ -1419,11 +1419,11 @@ impl Canopy {
                 if let Some(fraction)=self.scan_fraction() {ui.add(egui::ProgressBar::new(fraction).desired_width(140.0).desired_height(8.0).text(RichText::new(format!("{:.0}%",fraction*100.0)).size(10.0)));}
                 ctx.request_repaint_after(Duration::from_millis(100));
             } else if let Some(scan)=self.scan.clone() {
-                if scan.stats.cancelled {ui.label(RichText::new("Partial scan").size(12.0).color(AMBER));}
+                ui.label(RichText::new(result_state(&scan)).size(12.0).color(if scan.stats.cancelled {AMBER}else{MUTED}));
                 ui.menu_button("Scan notes",|ui| {
                     ui.set_max_width(420.0);
-                    ui.label(concat!("Diskvale v",env!("CARGO_PKG_VERSION")));
-                    ui.label(format!("{} · {:.2}s",if scan.stats.cancelled {"Partial scan"}else if is_saved_scan(&scan){"Saved result"}else{"Complete"},scan.stats.elapsed_seconds));
+                    ui.label(brand::RELEASE_LABEL);
+                    ui.label(format!("{} · {:.2}s",result_state(&scan),scan.stats.elapsed_seconds));
                     if !is_saved_scan(&scan) && let Some(at)=self.loaded_at {
                         ui.label(if at.elapsed().as_secs()<60 {"Scanned just now".into()}else{format!("Scanned {} min ago",at.elapsed().as_secs()/60)});
                     }
@@ -1436,7 +1436,7 @@ impl Canopy {
                     if let Some(space)=&scan.stats.volume_space {ui.separator();ui.label(format!("Free space changed by {} during the scan. Outside indexed files is a remainder, not a proven NTFS-metadata total.",self.size(space.free.abs_diff(space.free_at_start))));}
                     if let Some(delta)=self.delta(&scan,0) {ui.separator();ui.label(format!("Change vs saved scan: {}{}",if delta<0 {"−"}else{"+"},self.size(delta.unsigned_abs().min(u64::MAX as u128) as u64)));}
                 });
-            } else {ui.label(RichText::new("Ready").size(12.0).color(MUTED));}
+            } else {ui.label(RichText::new(brand::READY_LABEL).size(12.0).color(MUTED));}
         });});
     }
 
@@ -1510,6 +1510,21 @@ impl Canopy {
             }
         });
         self.delete_dialog(ctx);
+    }
+}
+
+/// Visible provenance comes from runtime state, never from snapshot notices.
+fn result_state(scan: &Scan) -> &'static str {
+    use canopy::model::Provenance;
+    if scan.stats.cancelled {
+        "Partial scan"
+    } else {
+        match scan.stats.runtime.provenance() {
+            Provenance::Live => "Live scan",
+            Provenance::Snapshot => "Saved result · Read only",
+            Provenance::Replay => "Saved index · Read only",
+            Provenance::Incomplete => "Partial scan",
+        }
     }
 }
 
@@ -2427,6 +2442,60 @@ mod tests {
             drives: vec![],
         }
     }
+    #[test]
+    fn preview_version_and_result_provenance_are_visible_without_starting_a_scan() {
+        use crate::model::{Provenance, RuntimeState};
+        for size in [vec2(1050.0, 700.0), vec2(1400.0, 900.0)] {
+            let ctx = egui::Context::default();
+            configure_ui(&ctx);
+            let input = || egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let mut idle = app(None);
+            let output = ctx.run(input(), |ctx| idle.render(ctx));
+            assert!(
+                texts(&output)
+                    .iter()
+                    .any(|(text, _, _)| text == brand::READY_LABEL)
+            );
+            assert!(idle.scan.is_none() && idle.receiver.is_none());
+            for (provenance, cancelled, label) in [
+                (Provenance::Live, false, "Live scan"),
+                (Provenance::Snapshot, false, "Saved result · Read only"),
+                (Provenance::Replay, false, "Saved index · Read only"),
+                (Provenance::Incomplete, true, "Partial scan"),
+            ] {
+                let mut scan = fixture();
+                scan.stats.runtime = RuntimeState::new(provenance);
+                scan.stats.cancelled = cancelled;
+                assert_eq!(
+                    is_saved_scan(&scan),
+                    matches!(provenance, Provenance::Snapshot | Provenance::Replay)
+                );
+                if provenance != Provenance::Live {
+                    assert!(!scan.deletion_eligible());
+                }
+                let mut result = app(Some(scan));
+                let output = ctx.run(input(), |ctx| result.render(ctx));
+                assert!(
+                    texts(&output)
+                        .iter()
+                        .any(|(text, rect, _)| text == label && rect.right() <= size.x)
+                );
+                if provenance == Provenance::Live {
+                    result.scan_stale = true;
+                    let output = ctx.run(input(), |ctx| result.render(ctx));
+                    assert!(
+                        texts(&output)
+                            .iter()
+                            .any(|(text, _, _)| text == "Out of date · Rescan")
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn views_fit_both_sizes_and_map_selection_expands_the_matching_tree_path() {
         for size in [vec2(1050.0, 700.0), vec2(1400.0, 900.0)] {
