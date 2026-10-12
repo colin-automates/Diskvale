@@ -2,7 +2,8 @@
 param(
     [string]$Executable = '',
     [string]$OutputDirectory = '',
-    [switch]$TestCandidate
+    [switch]$TestCandidate,
+    [switch]$RequireSignature
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +35,24 @@ try {
 if ($buildInfo.source_commit -ne $sourceCommit -or $buildInfo.version -ne $version -or $buildInfo.executable_sha256 -ne $binaryHash) {
     throw 'Executable provenance does not match this source commit, version and hash. Rebuild before packaging.'
 }
+$signature = Get-AuthenticodeSignature -LiteralPath $Executable
+$signed = $signature.Status -eq 'Valid'
+if ($RequireSignature -or $buildInfo.signing) {
+    if (-not $signed -or -not $signature.TimeStamperCertificate -or -not $buildInfo.signing) {
+        throw 'Signed release packaging requires a valid timestamped signature and signing provenance.'
+    }
+    if ($signature.SignerCertificate.Thumbprint -ne $buildInfo.signing.certificate_thumbprint -or
+        $signature.TimeStamperCertificate.Thumbprint -ne $buildInfo.signing.timestamp_certificate_thumbprint) {
+        throw 'Signature certificates do not match the signed build provenance.'
+    }
+} elseif ($signature.Status -ne 'NotSigned') {
+    throw 'Unexpected signature status; do not package a signature that has not been verified.'
+}
+$signatureInfo = if ($signed) {
+    "Digitally signed by $($signature.SignerCertificate.Subject). Verify SHA256SUMS.txt.`r`nWindows may still show a SmartScreen reputation warning for a new release."
+} else {
+    'This unsigned build may show an unknown-publisher warning. Verify SHA256SUMS.txt.'
+}
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $staging = Join-Path $OutputDirectory 'Diskvale'
@@ -59,7 +78,7 @@ Source commit: $sourceCommit
 
 Windows 10/11 x64, a whole NTFS drive and administrator access are required.
 No installer, development tools or separate Visual C++ runtime are needed.
-This unsigned build may show an unknown-publisher warning. Verify SHA256SUMS.txt.
+$signatureInfo
 The NTFS reader is experimental; unsupported metadata returns an explicit error.
 Large drives may need substantial memory. Full-volume correctness and performance
 parity with other tools have not been established.
@@ -81,6 +100,9 @@ https://github.com/colin-automates/Diskvale/issues/new?template=bug_report.yml
 
 Full source, documentation, updates and demo:
 https://github.com/colin-automates/Diskvale
+
+Code signing policy:
+https://github.com/colin-automates/Diskvale/blob/main/CODE_SIGNING.md
 
 Diskvale is MIT licensed. See LICENSE and THIRD_PARTY_NOTICES.txt.
 "@

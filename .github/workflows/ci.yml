@@ -28,9 +28,14 @@ jobs:
         run: cargo test --locked
       - name: Check warnings
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Check signing content regressions
+        run: python -m unittest discover -s scripts/tests -p "test_*.py"
       - name: Build portable application
         shell: powershell
         run: ./scripts/build_release.ps1
+      - name: Check signed packaging guards
+        shell: powershell
+        run: ./scripts/tests/check_signing_guards.ps1
       - name: Package application
         shell: powershell
         run: ./scripts/package_release.ps1

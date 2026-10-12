@@ -11,6 +11,8 @@ Diskvale turns a whole NTFS drive into an interactive map, with large-file lists
 
 **Early preview · Windows 10/11 x64 · NTFS · Administrator required.** The build is unsigned; Windows may show an unknown-publisher warning.
 
+[Code signing policy](CODE_SIGNING.md) · SignPath Foundation setup is in progress; current downloads remain unsigned.
+
 ![Diskvale exploring a generated studio drive](docs/media/diskvale.png)
 
 ## Download and run

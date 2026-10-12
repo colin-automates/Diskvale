@@ -2,6 +2,12 @@
 
 Diskvale is an early preview. Publish experimental builds as GitHub prereleases with explicit versioned download links; [GitHub excludes prereleases from latest](https://docs.github.com/en/rest/releases/releases#get-the-latest-release). Do not move an existing tag or make a preview stable to change that redirect.
 
+## Code signing policy
+
+See the [code signing policy](../CODE_SIGNING.md) and [SignPath setup](code-signing-setup.md). Existing 0.3.27 downloads are unsigned; Foundation approval and account configuration are pending. After setup, use **Prepare signed Windows release** from `main` for a new version, with a manual SignPath approval. Verify its signed artifact and use all assets from that run together. Signing changes the EXE hash, so provenance, ZIP and checksums must be generated after signature verification. Do not replace an existing release's unsigned assets or call a dry run signed.
+
+## Publication checks
+
 1. Fetch refs, preserve existing work, inspect applicable repository instructions and branch rules. Choose an unused version. Update `Cargo.toml`, the `canopy` lockfile entry, README/page links, and release notes together. The app and Windows resources derive their version from Cargo.
 2. Run `cargo fmt --all -- --check`, `cargo test --locked`, and `cargo clippy --locked --all-targets -- -D warnings`. Normal tests use synthetic/disposable fixtures; inspect and deliberately select any ignored test. Never run all ignored deletion tests blindly.
 3. Commit relevant source and documentation through the permitted repository workflow. From that **clean commit**, run:
