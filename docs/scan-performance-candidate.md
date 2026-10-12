@@ -1,6 +1,6 @@
-# Diskvale 0.3.27 — scan performance candidate
+# Diskvale 0.3.27 — scan performance validation
 
-This candidate reduces allocation and memory-copy work in the existing read-only NTFS scanner and records separate stage timings. The public download remains 0.3.26 while the candidate is evaluated. No dependency, scanner architecture, deletion-authority or public-download change is included.
+Diskvale 0.3.27 reduces allocation and memory-copy work in the existing read-only NTFS scanner and records separate stage timings. The user confirmed that the extracted candidate worked before authorizing publication. The [0.3.27 preview](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.27) retains the existing dependencies, scanner architecture and deletion safeguards.
 
 ## Changes
 
@@ -23,9 +23,13 @@ Timings are taken per chunk or external list, not per ordinary record. Existing 
 
 The standard suite passed with **144 library + 7 integration tests; 3 opt-in tests ignored**. All **49 NTFS regressions** passed, including new coverage for update-sequence overlap/buffer limits, supplementary Unicode and malformed names, prevalidation before external reads, DOS alias versus separate hard-link names, accumulated retry timings, fresh external-list bytes/cursor restoration and older snapshot compatibility. Formatting and strict all-target Clippy passed. Shell-deletion integrations were not enabled for this performance change.
 
-The existing generated 100,000-file flat-MFT fixture is used for paired release-mode comparisons against the preserved 0.3.26 benchmark. Both builds must produce 100,003 nodes, 921,616,384 allocated bytes and zero per-file metadata queries. Runs alternate in ABBA order, using the same local compiler, target, flags and fixture; report medians rather than selecting a fastest run. This fixture tests bulk parsing/tree work, not full-volume I/O or external-list compatibility. Live C: timing summaries remain private local artifacts and contain no per-file capture.
+Paired comparisons used the same local Rust 1.98.1 MSVC toolchain, static CRT and release flags, alternating builds in ABBA order. The generated 100,000-file flat-MFT fixture took a median **62.0893 ms on 0.3.26 versus 48.3009 ms on 0.3.27** across 20 runs per build, a **22.21% reduction**. Every run produced 100,003 nodes, 921,616,384 allocated bytes and zero per-file metadata queries. This fixture tests bulk parsing/tree work, not full-volume I/O or external-list compatibility.
 
-Build from the clean tested commit:
+Four read-only C: scans per build took a median **11.3844 s versus 9.4880 s**, a **16.66% reduction**. Median peak working set fell from **2599.33 MiB to 2135.91 MiB**, a **17.83% reduction**. All eight scans completed without cancellation, read errors, unknown allocations or parent-reference retries. Live namespace activity prevents an atomic totals comparison. These results describe this drive and local toolchain, not guaranteed gains on every system or measurements of the CI-built download. Raw timing summaries remain private ignored artifacts; no per-file capture, snapshot or CSV was uploaded.
+
+The accepted candidate was built from `f185c9725fb61224d03e17e449cf7bd93a8fc3b5`, with EXE SHA-256 `d55323ccc59bdba05c6fcc4bce2edb65be665ac30f1f0ce514f9d0354de8a160`. The public package uses the clean release commit containing the same application code and final release documentation; its `BUILD_INFO.json` records its source, toolchain and checksum. Candidate GUI acceptance is user-confirmed.
+
+For a separate unpublished test package, build from a clean tested commit:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_release.ps1
@@ -33,6 +37,6 @@ powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1 -TestCandid
 python scripts/check_brand_resources.py
 ```
 
-Open the candidate, approve normal administrator access, choose C: and click Scan. Verify the complete scan and Map, Files, Types, search and save/reopen/export behavior. Compare Scan notes and elapsed times under similar activity; changing live metadata, cache state and retries can affect results. Keep snapshots and filenames private. A measured reduction on one fixture or drive does not establish speed/correctness parity with other tools.
+Public packaging omits `-TestCandidate`; follow [release maintenance](release.md) for clean-source build, CI, provenance and public-download checks. For subsequent candidates, approve normal administrator access, choose the same NTFS drive and click Scan. Verify complete scanning, navigation/search and save/reopen/export behavior. Compare Scan notes and elapsed times under similar activity; changing live metadata, cache state and retries can affect results. Keep snapshots and filenames private. A measured reduction on one fixture or drive does not establish speed/correctness parity with other tools.
 
 Stage results determine the next optimization. Pipelining reads and parsing, or adding parser workers, should target a measured bottleneck and retain bounded memory, independent external-read positioning, deterministic assembly, cancellation and the same validation checks.

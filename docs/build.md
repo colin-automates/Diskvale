@@ -50,4 +50,4 @@ From an administrator terminal:
 `--compact` uses a 1050×700 window; `--view largest` and `--view types` choose a results tab. `--focus "Projects"` focuses a relative path within loaded results. The release uses the Windows GUI subsystem; redirect output for headless scans. `--mft-file saved.mft` is a diagnostic parser input; `--snapshot scan.json` opens saved results. The production executable still requires an administrator token for these modes.
 
 
-See [release maintenance](release.md) for publication and public-download verification. Download the current [v0.3.26 early preview](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.26).
+See [release maintenance](release.md) for publication and public-download verification. Download the current [v0.3.27 early preview](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.27).
