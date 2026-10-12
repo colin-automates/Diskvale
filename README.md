@@ -7,7 +7,7 @@
 
 Diskvale turns a whole NTFS drive into an interactive map, with large-file lists, file-type totals and search. It runs locally as a native Rust/egui application.
 
-**[Download v0.3.24 for Windows](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale-windows-x64.zip)** · [Release notes](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.24) · [Watch the demo](https://colin-automates.github.io/Diskvale/)
+**[Download v0.3.26 for Windows](https://github.com/colin-automates/Diskvale/releases/download/v0.3.26/Diskvale-windows-x64.zip)** · [Release notes](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.26) · [Watch the demo](https://colin-automates.github.io/Diskvale/)
 
 **Early preview · Windows 10/11 x64 · NTFS · Administrator required.** The build is unsigned; Windows may show an unknown-publisher warning.
 
@@ -15,12 +15,12 @@ Diskvale turns a whole NTFS drive into an interactive map, with large-file lists
 
 ## Download and run
 
-| Download v0.3.24 | What you get |
+| Download v0.3.26 | What you get |
 | --- | --- |
-| [Windows x64 portable ZIP](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale-windows-x64.zip) | Recommended: Diskvale.exe, quick-start guide, build provenance, MIT license and third-party notices. |
-| [Diskvale.exe](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale.exe) | Standalone application, with no installer. |
-| [SHA-256 checksums](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/SHA256SUMS.txt) | Checksums for the exact release assets. |
-| [Source for this version](https://github.com/colin-automates/Diskvale/archive/refs/tags/v0.3.24.zip) | Source, tests, artwork and documentation at the release tag. |
+| [Windows x64 portable ZIP](https://github.com/colin-automates/Diskvale/releases/download/v0.3.26/Diskvale-windows-x64.zip) | Recommended: Diskvale.exe, quick-start guide, build provenance, MIT license and third-party notices. |
+| [Diskvale.exe](https://github.com/colin-automates/Diskvale/releases/download/v0.3.26/Diskvale.exe) | Standalone application, with no installer. |
+| [SHA-256 checksums](https://github.com/colin-automates/Diskvale/releases/download/v0.3.26/SHA256SUMS.txt) | Checksums for the exact release assets. |
+| [Source for this version](https://github.com/colin-automates/Diskvale/archive/refs/tags/v0.3.26.zip) | Source, tests, artwork and documentation at the release tag. |
 
 1. Download the ZIP and extract it into a folder.
 2. Open `Diskvale.exe` and approve the Windows administrator prompt.
@@ -41,7 +41,7 @@ Sizes default to decimal GB/MB/KB; binary GiB/MiB/KiB are available. Size filter
 
 ## Early-preview limitations
 
-The **experimental NTFS reader** scans whole local NTFS drives. Arbitrary folders, network shares and other filesystems are unsupported; navigating a folder explores the existing drive index. Unsupported or incomplete metadata returns an explicit error rather than silently selecting another scanner. Ordinary nonresident attribute lists currently prevent a complete scan; the MFT-bootstrap reader supports its documented cases.
+The **experimental NTFS reader** scans whole local NTFS drives. Arbitrary folders, network shares and other filesystems are unsupported; navigating a folder explores the existing drive index. Supported nonresident attribute lists are resolved and validated for the MFT and ordinary files/directories. Split, compressed, sparse or encrypted list layouts remain unsupported. Incomplete metadata returns an explicit error rather than silently selecting another scanner. A parent-reference inconsistency permits one complete validated reread; persistent inconsistencies still fail. See the [supported layouts and limits](docs/technical.md#current-scope).
 
 Large scans can require substantial memory. **Full-volume correctness and performance parity with other disk tools have not been established.** Scans are live metadata reads, not atomic filesystem snapshots. Hard links share allocation, and directory streams and volume overhead have specific accounting rules described in the [technical notes](docs/technical.md). Live USN updates and duplicate-file discovery are not implemented.
 
@@ -51,9 +51,9 @@ Deletion rechecks NTFS and volume identity, rejects reparse paths and holds ance
 
 [![Play the Diskvale demo](docs/media/demo-poster.png)](https://colin-automates.github.io/Diskvale/)
 
-[Watch the 30-second video](https://colin-automates.github.io/Diskvale/) · [Download the MP4](https://github.com/colin-automates/Diskvale/releases/download/v0.3.24/Diskvale-Demo.mp4)
+[Watch the 30-second video](https://colin-automates.github.io/Diskvale/) · [Download the MP4](https://github.com/colin-automates/Diskvale/releases/download/v0.3.26/Diskvale-Demo.mp4)
 
-The screenshot and tour use the actual application with **generated drive data**. File counts and timings shown are illustrative, not real-drive benchmarks. The existing demo shows the same interface; v0.3.24 adds result/preview labels and the fixes in its release notes. [Demo source and rendering instructions](tools/demo-video/README.md).
+The screenshot and tour use the actual application with **generated drive data**. File counts and timings shown are illustrative, not real-drive benchmarks. The existing demo shows the same interface; v0.3.26 includes result/preview labels and the NTFS compatibility fixes in its release notes. [Demo source and rendering instructions](tools/demo-video/README.md).
 
 ## Documentation and feedback
 
