@@ -1468,6 +1468,71 @@ fn metadata_reads_restore_the_sequential_cursor_on_success_and_failure() {
 }
 
 #[test]
+fn repeated_external_reads_use_fresh_bytes_and_the_known_bulk_cursor() {
+    use std::io::{Seek, SeekFrom};
+    struct ObservedVolume {
+        disk: Cursor<Vec<u8>>,
+        cursor_queries: usize,
+        list_reads: usize,
+    }
+    impl Read for ObservedVolume {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.disk.position() == 5 * 4096 {
+                self.list_reads += 1;
+                if self.list_reads == 2 {
+                    // Reusing the same mapped clusters must observe this change.
+                    self.disk.get_mut()[5 * 4096..6 * 4096].fill(0);
+                }
+            }
+            self.disk.read(bytes)
+        }
+    }
+    impl Seek for ObservedVolume {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            if matches!(position, SeekFrom::Current(0)) {
+                self.cursor_queries += 1;
+            }
+            self.disk.seek(position)
+        }
+    }
+    let (volume, geometry) = external_list_volume();
+    let mut first = volume[fixture_record_offset(0)..fixture_record_offset(0) + 1024].to_vec();
+    fixup(&mut first, 512, false).unwrap();
+    let attrs = attributes(&first).unwrap();
+    let list = attrs.iter().find(|a| u32_at(a, 0) == Some(0x20)).unwrap();
+    let mut disk = ObservedVolume {
+        disk: Cursor::new(volume),
+        cursor_queries: 0,
+        list_reads: 0,
+    };
+    let mut reader = MappedReader::new(
+        &mut disk,
+        vec![Run {
+            lcn: Some(10),
+            clusters: 2,
+        }],
+        4096,
+        8192,
+    )
+    .unwrap();
+    let mut prefix = vec![0; 1024];
+    reader.read_exact(&mut prefix).unwrap();
+    reader
+        .resolve_list(list, geometry, &Progress::default())
+        .unwrap();
+    let error = reader
+        .resolve_list(list, geometry, &Progress::default())
+        .unwrap_err();
+    assert!(error.contains("Empty nonresident"));
+    let mut next = vec![0; 1024];
+    reader.read_exact(&mut next).unwrap();
+    drop(reader);
+    assert_eq!(disk.cursor_queries, 0);
+    assert_eq!(disk.list_reads, 2);
+    assert_eq!(disk.disk.position(), 10 * 4096 + 2048);
+}
+
+#[test]
 fn cancellation_during_external_resolution_produces_partial_read_only_result() {
     let (volume, geometry) = external_list_volume();
     let progress = Progress::default();

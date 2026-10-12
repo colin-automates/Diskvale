@@ -111,6 +111,8 @@ pub(super) struct MappedReader<'a, R> {
     run: usize,
     in_run: u64,
     bootstrap: Option<Bootstrap>,
+    cursor: Option<u64>,
+    list_buffer: Vec<u8>,
 }
 impl<'a, R: Read + Seek> MappedReader<'a, R> {
     pub fn new(file: &'a mut R, runs: Vec<Run>, cluster: u64, valid: u64) -> Result<Self, String> {
@@ -134,6 +136,8 @@ impl<'a, R: Read + Seek> MappedReader<'a, R> {
             run: 0,
             in_run: 0,
             bootstrap: None,
+            cursor: None,
+            list_buffer: Vec::new(),
         })
     }
 
@@ -160,7 +164,14 @@ impl<R: Read + Seek> IndexSource for MappedReader<'_, R> {
         geometry: Geometry,
         progress: &Progress,
     ) -> Result<Vec<ListEntry>, String> {
-        read_attribute_list(self.file, attr, geometry, progress)
+        read_attribute_list_buffered(
+            self.file,
+            attr,
+            geometry,
+            progress,
+            self.cursor,
+            &mut self.list_buffer,
+        )
     }
     fn validate_record(&mut self, index: usize, raw: &[u8]) -> Result<(), String> {
         if let Some(bootstrap) = &mut self.bootstrap
@@ -209,6 +220,17 @@ pub(super) fn read_attribute_list<R: Read + Seek>(
     attr: &[u8],
     geometry: Geometry,
     progress: &Progress,
+) -> Result<Vec<ListEntry>, String> {
+    read_attribute_list_buffered(file, attr, geometry, progress, None, &mut Vec::new())
+}
+
+fn read_attribute_list_buffered<R: Read + Seek>(
+    file: &mut R,
+    attr: &[u8],
+    geometry: Geometry,
+    progress: &Progress,
+    saved_cursor: Option<u64>,
+    bytes: &mut Vec<u8>,
 ) -> Result<Vec<ListEntry>, String> {
     if progress.cancelled() {
         return Err("NTFS metadata read cancelled".into());
@@ -263,13 +285,23 @@ pub(super) fn read_attribute_list<R: Read + Seek>(
             .total_clusters
             .ok_or("Missing volume bounds for external NTFS metadata")?,
     )?;
-    let original = file
-        .stream_position()
-        .map_err(|e| format!("Saving NTFS read cursor: {e}"))?;
+    let original = match saved_cursor {
+        Some(position) => position,
+        None => file
+            .stream_position()
+            .map_err(|e| format!("Saving NTFS read cursor: {e}"))?,
+    };
     let result = (|| {
         let mut reader = MappedReader::new(file, mapping, geometry.cluster, aligned)?;
-        let mut bytes =
-            vec![0; usize::try_from(aligned).map_err(|_| "Attribute-list allocation overflow")?];
+        let needed = usize::try_from(aligned).map_err(|_| "Attribute-list allocation overflow")?;
+        if bytes.capacity() < needed {
+            // Reuse storage, not metadata: every requested byte is reread below.
+            // Exact reservation avoids geometric growth beyond the 16 MiB bound.
+            bytes
+                .try_reserve_exact(needed.saturating_sub(bytes.len()))
+                .map_err(|_| "Insufficient memory for the NTFS attribute list")?;
+        }
+        bytes.resize(needed, 0);
         for chunk in bytes.chunks_mut(64 * 1024) {
             if progress.cancelled() {
                 return Err("NTFS metadata read cancelled".into());
@@ -281,8 +313,7 @@ pub(super) fn read_attribute_list<R: Read + Seek>(
         if progress.cancelled() {
             return Err("NTFS metadata read cancelled".into());
         }
-        bytes.truncate(length as usize);
-        let entries = format::attribute_list(&bytes)?;
+        let entries = format::attribute_list(&bytes[..length as usize])?;
         if entries.is_empty() {
             return Err(
                 "Empty nonresident NTFS attribute list; completeness cannot be verified".into(),
@@ -319,6 +350,7 @@ impl<R: Read + Seek> Read for MappedReader<'_, R> {
             self.file.seek(SeekFrom::Start(pos))?;
         }
         let read = self.file.read(&mut buf[..len])?;
+        self.cursor = pos.checked_add(read as u64);
         self.in_run += read as u64;
         self.remaining -= read as u64;
         if self.in_run == length {
