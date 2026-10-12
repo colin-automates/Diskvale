@@ -144,6 +144,19 @@ impl Node {
     }
 }
 
+/// Exclusive scanner stages, accumulated across all live index attempts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MftTimings {
+    pub bootstrap_seconds: f64,
+    pub index_io_seconds: f64,
+    pub parse_seconds: f64,
+    pub external_list_seconds: f64,
+    pub extension_merge_seconds: f64,
+    pub tree_seconds: f64,
+    pub external_lists: u64,
+    pub index_attempts: u32,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScanStats {
     #[serde(skip)]
@@ -181,6 +194,8 @@ pub struct ScanStats {
     pub mft_read_seconds: f64,
     #[serde(default)]
     pub tree_build_seconds: f64,
+    #[serde(default)]
+    pub mft_timings: Option<MftTimings>,
     #[serde(default)]
     pub unlinked_records: u64,
     #[serde(default)]

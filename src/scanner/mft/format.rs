@@ -84,8 +84,31 @@ pub(super) fn fixup(record: &mut [u8], sector: usize, kernel_record: bool) -> Re
     }
     let usa = record
         .get(offset..offset + count * 2)
-        .ok_or("Truncated update sequence")?
-        .to_vec();
+        .ok_or("Truncated update sequence")?;
+    if let Ok(saved) = <[u8; 6]>::try_from(usa) {
+        // The common 1 KiB record / 512-byte sector geometry needs six bytes.
+        return restore_tails(record, &saved, sector, kernel_record);
+    }
+    // All supported geometries fit here (64 KiB records, >=256-byte sectors).
+    // Copy before restoring tails, including unusual overlapping USA layouts.
+    let mut scratch = [0u8; 514];
+    if usa.len() <= scratch.len() {
+        let len = usa.len();
+        scratch[..len].copy_from_slice(usa);
+        restore_tails(record, &scratch[..len], sector, kernel_record)
+    } else {
+        // Preserve this helper's behavior outside the bounded live geometry.
+        let saved = usa.to_vec();
+        restore_tails(record, &saved, sector, kernel_record)
+    }
+}
+fn restore_tails(
+    record: &mut [u8],
+    usa: &[u8],
+    sector: usize,
+    kernel_record: bool,
+) -> Result<(), String> {
+    let count = usa.len() / 2;
     let raw = (1..count).all(|i| record[i * sector - 2..i * sector] == usa[..2]);
     // Kernel metadata queries can return restored tails; raw bulk reads must match every signature.
     let restored = kernel_record
@@ -101,6 +124,30 @@ pub(super) fn fixup(record: &mut [u8], sector: usize, kernel_record: bool) -> Re
     Ok(())
 }
 pub(super) fn attributes(record: &[u8]) -> Result<Vec<&[u8]>, String> {
+    Ok(attribute_view(record)?.collect())
+}
+
+#[derive(Clone)]
+struct Attributes<'a> {
+    record: &'a [u8],
+    offset: usize,
+    end: usize,
+    has_list: bool,
+}
+impl<'a> Iterator for Attributes<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == self.end {
+            return None;
+        }
+        // The complete immutable record was validated before exposing this view.
+        let len = u32_at(self.record, self.offset + 4).expect("validated attribute") as usize;
+        let attr = &self.record[self.offset..self.offset + len];
+        self.offset += len;
+        Some(attr)
+    }
+}
+fn attribute_view(record: &[u8]) -> Result<Attributes<'_>, String> {
     let mut offset = u16_at(record, 20).ok_or("Missing attribute offset")? as usize;
     let used = u32_at(record, 24).ok_or("Missing record length")? as usize;
     let allocated = u32_at(record, 28).ok_or("Missing allocated record length")? as usize;
@@ -115,11 +162,17 @@ pub(super) fn attributes(record: &[u8]) -> Result<Vec<&[u8]>, String> {
     {
         return Err("Invalid FILE record bounds".into());
     }
-    let mut result = vec![];
+    let first = offset;
+    let mut has_list = false;
     while offset + 4 <= used {
         let typ = u32_at(record, offset).ok_or("Missing attribute type")?;
         if typ == u32::MAX {
-            return Ok(result);
+            return Ok(Attributes {
+                record,
+                offset: first,
+                end: offset,
+                has_list,
+            });
         }
         let len = u32_at(record, offset + 4).ok_or("Missing attribute size")? as usize;
         if len < 24 || !len.is_multiple_of(8) || len > used - offset {
@@ -135,8 +188,8 @@ pub(super) fn attributes(record: &[u8]) -> Result<Vec<&[u8]>, String> {
         if attr[8] == 0 {
             resident(attr)?;
         }
-        attribute_name(attr)?;
-        result.push(attr);
+        validate_unicode(attribute_name_bytes(attr)?)?;
+        has_list |= typ == 0x20;
         offset += len;
     }
     Err("Missing attribute terminator".into())
@@ -157,29 +210,59 @@ fn unicode(bytes: &[u8]) -> Result<String, String> {
     if !bytes.len().is_multiple_of(2) {
         return Err("Unaligned UTF-16 name".into());
     }
-    String::from_utf16(
-        &bytes
+    if bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|b| b[1] == 0 && b[0] < 128)
+    {
+        // This allocation becomes the String's storage; there is no UTF-16 Vec.
+        let ascii = bytes.as_chunks::<2>().0.iter().map(|b| b[0]).collect();
+        return Ok(String::from_utf8(ascii).expect("validated ASCII"));
+    }
+    let mut text = String::with_capacity(bytes.len() / 2);
+    for character in char::decode_utf16(
+        bytes
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|b| u16::from_le_bytes(*b))
-            .collect::<Vec<_>>(),
+            .map(|b| u16::from_le_bytes(*b)),
+    ) {
+        text.push(character.map_err(|_| "Unsupported invalid UTF-16 NTFS name")?);
+    }
+    Ok(text)
+}
+fn validate_unicode(bytes: &[u8]) -> Result<(), String> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err("Unaligned UTF-16 name".into());
+    }
+    if char::decode_utf16(
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b)),
     )
-    .map_err(|_| "Unsupported invalid UTF-16 NTFS name".into())
+    .any(|character| character.is_err())
+    {
+        return Err("Unsupported invalid UTF-16 NTFS name".into());
+    }
+    Ok(())
 }
 pub(super) fn attribute_name(attr: &[u8]) -> Result<String, String> {
+    unicode(attribute_name_bytes(attr)?)
+}
+fn attribute_name_bytes(attr: &[u8]) -> Result<&[u8], String> {
     let chars = *attr.get(9).ok_or("Missing attribute name length")? as usize;
     if chars == 0 {
-        return Ok(String::new());
+        return Ok(&[]);
     }
     let off = u16_at(attr, 10).ok_or("Missing attribute name offset")? as usize;
     if off < if attr[8] == 0 { 24 } else { 64 } {
         return Err("Attribute name overlaps its header".into());
     }
-    unicode(
-        attr.get(off..off + chars * 2)
-            .ok_or("Invalid stream name bounds")?,
-    )
+    attr.get(off..off + chars * 2)
+        .ok_or_else(|| "Invalid stream name bounds".into())
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ListEntry {
@@ -307,12 +390,14 @@ impl Record {
         Ok(())
     }
     pub fn finalize_streams(&mut self, cancelled: bool) -> Result<(), String> {
-        let present: HashSet<_> = self.present.iter().collect();
-        if self.required.iter().any(|entry| !present.contains(entry)) {
-            if !cancelled {
-                return Err("Missing or mismatched listed NTFS attribute".into());
+        if !self.required.is_empty() {
+            let present: HashSet<_> = self.present.iter().collect();
+            if self.required.iter().any(|entry| !present.contains(entry)) {
+                if !cancelled {
+                    return Err("Missing or mismatched listed NTFS attribute".into());
+                }
+                self.incomplete = true;
             }
-            self.incomplete = true;
         }
         self.continuations
             .sort_unstable_by(|a, b| (&a.name, a.range).cmp(&(&b.name, b.range)));
@@ -401,6 +486,16 @@ impl Record {
         if self.names.len() <= 1 {
             return;
         }
+        if self.names.len() == 2
+            && self.names[0].parent == self.names[1].parent
+            && self.names[0].dos != self.names[1].dos
+        {
+            // A DOS alias and its long name share a parent. Other hard-link
+            // combinations still use full normalization and deduplication.
+            let dos = usize::from(!self.names[0].dos);
+            self.names.swap_remove(dos);
+            return;
+        }
         let long_parents: HashSet<_> = self
             .names
             .iter()
@@ -452,9 +547,8 @@ pub(super) fn parse_with_lists(
         links: u16_at(raw, 18).ok_or("Missing NTFS link count")?,
         ..Default::default()
     };
-    let attrs = attributes(raw)?;
-    let needs_identities =
-        record.base != 0 || attrs.iter().any(|attr| u32_at(attr, 0) == Some(0x20));
+    let attrs = attribute_view(raw)?;
+    let needs_identities = record.base != 0 || attrs.has_list;
     for attr in attrs {
         if needs_identities {
             record.present.push(ListEntry {
@@ -501,6 +595,10 @@ pub(super) fn parse_with_lists(
                     || (text == "." && index != 5)
                 {
                     return Err("Invalid NTFS path component".into());
+                }
+                if record.names.capacity() == 0 {
+                    // Ordinary records have one long name and often a DOS alias.
+                    record.names.reserve_exact(2);
                 }
                 record.names.push(Name {
                     parent: u64_at(name, 0).ok_or("Missing parent reference")?,

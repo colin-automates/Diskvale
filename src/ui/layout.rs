@@ -1424,6 +1424,12 @@ impl Canopy {
                     ui.set_max_width(420.0);
                     ui.label(brand::RELEASE_LABEL);
                     ui.label(format!("{} · {:.2}s",result_state(&scan),scan.stats.elapsed_seconds));
+                    if let Some(timing) = &scan.stats.mft_timings {
+                        ui.label(format!("Captured scan timing · {} index attempt(s)", timing.index_attempts));
+                        ui.label(format!("Index reads: {:.2}s · Parsing/validation: {:.2}s", timing.index_io_seconds, timing.parse_seconds));
+                        ui.label(format!("External lists: {:.2}s · Extension merge: {:.2}s", timing.external_list_seconds, timing.extension_merge_seconds));
+                        ui.label(format!("Tree: {:.2}s · Bootstrap: {:.2}s", timing.tree_seconds, timing.bootstrap_seconds));
+                    }
                     if !is_saved_scan(&scan) && let Some(at)=self.loaded_at {
                         ui.label(if at.elapsed().as_secs()<60 {"Scanned just now".into()}else{format!("Scanned {} min ago",at.elapsed().as_secs()/60)});
                     }

@@ -592,6 +592,99 @@ fn rejects_torn_sector_and_only_allows_restored_kernel_records() {
     b[510] ^= 1;
     assert!(fixup(&mut b, 512, true).is_err());
 }
+
+#[test]
+fn fixup_preserves_saved_replacements_when_the_usa_overlaps_sector_tails() {
+    // The maximum supported geometry fits the stack buffer. The larger case
+    // preserves the helper's old heap fallback outside live geometry bounds.
+    for length in [65536, 131072] {
+        let sector = 256;
+        let count = length / sector + 1;
+        let mut raw = vec![0; length];
+        raw[..4].copy_from_slice(b"FILE");
+        put16(&mut raw, 4, 48);
+        put16(&mut raw, 6, count as u16);
+        put16(&mut raw, 48, 0xabcd);
+        for index in 1..count {
+            put16(&mut raw, 48 + index * 2, index as u16);
+        }
+        for index in 1..count {
+            put16(&mut raw, index * sector - 2, 0xabcd);
+        }
+        let saved = raw[48..48 + count * 2].to_vec();
+        fixup(&mut raw, sector, false).unwrap();
+        for index in 1..count {
+            assert_eq!(
+                &raw[index * sector - 2..index * sector],
+                &saved[index * 2..index * 2 + 2]
+            );
+        }
+    }
+}
+
+#[test]
+fn decoded_names_keep_supplementary_unicode_and_reject_unpaired_surrogates() {
+    let expected = "東京🌍𝄞.txt";
+    let mut raw = record(20, false, 0, vec![filename(5, expected, 1)]);
+    fixup(&mut raw, 512, false).unwrap();
+    assert_eq!(
+        parse(&raw, 20, 4096, None).unwrap().unwrap().names[0].text,
+        expected
+    );
+    for surrogate in [0xd800, 0xdc00] {
+        let mut attr = filename(5, "ok", 1);
+        let value = u16_at(&attr, 20).unwrap() as usize;
+        put16(&mut attr, value + 66, surrogate);
+        let mut raw = record(20, false, 0, vec![attr]);
+        fixup(&mut raw, 512, false).unwrap();
+        assert!(parse(&raw, 20, 4096, None).unwrap_err().contains("UTF-16"));
+    }
+}
+
+#[test]
+fn two_name_normalization_discards_only_a_dos_alias_of_the_same_parent() {
+    for dos_first in [false, true] {
+        let mut names = vec![
+            filename(5, "Long Name.txt", 1),
+            filename(5, "LONGNA~1.TXT", 2),
+        ];
+        if dos_first {
+            names.reverse();
+        }
+        let mut raw = record(20, false, 0, names);
+        fixup(&mut raw, 512, false).unwrap();
+        let mut parsed = parse(&raw, 20, 4096, None).unwrap().unwrap();
+        parsed.normalize_names();
+        assert_eq!(parsed.names.len(), 1);
+        assert_eq!(parsed.names[0].text, "Long Name.txt");
+    }
+    for second in [filename(30, "LONGNA~1.TXT", 2), filename(5, "other.txt", 1)] {
+        let mut raw = record(20, false, 0, vec![filename(5, "Long Name.txt", 1), second]);
+        fixup(&mut raw, 512, false).unwrap();
+        let mut parsed = parse(&raw, 20, 4096, None).unwrap().unwrap();
+        parsed.normalize_names();
+        assert_eq!(parsed.names.len(), 2);
+    }
+}
+
+#[test]
+fn attribute_view_validates_unknown_names_before_any_external_metadata_read() {
+    let mut invalid = resident_attr(0x90, "a", b"");
+    let name_offset = u16_at(&invalid, 10).unwrap() as usize;
+    put16(&mut invalid, name_offset, 0xd800);
+    let mut list = nonresident("", 32, 4096, 0, 0, 0, &[0x11, 1, 50, 0]);
+    put32(&mut list, 0, 0x20);
+    let mut raw = record(20, false, 0, vec![list, invalid]);
+    fixup(&mut raw, 512, false).unwrap();
+    let mut reads = 0;
+    let error = parse_with_lists(&raw, 20, 4096, None, |_| {
+        reads += 1;
+        Ok(vec![])
+    })
+    .unwrap_err();
+    assert!(error.contains("UTF-16"));
+    assert_eq!(reads, 0);
+}
 #[test]
 fn ignores_deleted_records() {
     let mut b = record(0, false, 0, vec![]);
@@ -1532,6 +1625,15 @@ fn resolved_list_snapshot_and_csv_round_trip_does_not_preserve_deletion_authorit
         crate::model::Provenance::Snapshot
     );
     assert!(!loaded.deletion_eligible());
+    assert!(loaded.stats.mft_timings.is_some());
+    let mut legacy = serde_json::to_value(&loaded).unwrap();
+    legacy["stats"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mft_timings");
+    let legacy: Scan = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.stats.mft_timings.is_none());
+    assert!(!legacy.deletion_eligible());
     assert!(crate::recycle::Target::from_scan(&loaded, 1).is_err());
     let csv = output.path().join("synthetic.csv");
     crate::output::csv(&loaded, &csv, &Progress::default()).unwrap();
@@ -1568,16 +1670,21 @@ fn volume_attempt(
     volume: Vec<u8>,
     geometry: Geometry,
     progress: &Progress,
+    timings: &mut MftTimings,
 ) -> Result<Scan, IndexError> {
     let mut disk = Cursor::new(volume);
-    let mapping = bootstrap_fixture(&mut disk, geometry, progress)?;
+    let started = Instant::now();
+    let result = bootstrap_fixture(&mut disk, geometry, progress);
+    timings.bootstrap_seconds += started.elapsed().as_secs_f64();
+    let mapping = result?;
     let reader = MappedReader::with_bootstrap(&mut disk, mapping, geometry)?;
-    read_index_resolved(
+    read_index_timed(
         reader,
         Path::new("C:\\synthetic-fixture"),
         geometry,
         progress,
         "Volume fixture",
+        timings,
     )
 }
 
@@ -1588,7 +1695,7 @@ fn live_parent_retry_restarts_the_complete_validated_pipeline_without_double_cou
     put16(&mut changed, fixture_record_offset(31) + 16, 2);
     let progress = Progress::default();
     let mut attempts = 0;
-    let scan = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
+    let scan = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, |timings| {
         attempts += 1;
         if attempts == 2 {
             for counter in [
@@ -1611,10 +1718,25 @@ fn live_parent_retry_restarts_the_complete_validated_pipeline_without_double_cou
             },
             geometry,
             &progress,
+            timings,
         )
     })
     .unwrap();
     assert_eq!(attempts, 2);
+    let timing = scan.stats.mft_timings.as_ref().unwrap();
+    assert_eq!(timing.index_attempts, 2);
+    assert_eq!(timing.external_lists, 2);
+    assert!(timing.tree_seconds >= scan.stats.tree_build_seconds);
+    for seconds in [
+        timing.bootstrap_seconds,
+        timing.index_io_seconds,
+        timing.parse_seconds,
+        timing.external_list_seconds,
+        timing.extension_merge_seconds,
+        timing.tree_seconds,
+    ] {
+        assert!(seconds.is_finite() && seconds >= 0.0);
+    }
     assert_eq!(
         (
             scan.stats.files,
@@ -1657,11 +1779,12 @@ fn persistent_parent_mismatch_and_wrong_parent_type_fail_after_one_retry() {
         }
         let progress = Progress::default();
         let mut attempts = 0;
-        let error = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
-            attempts += 1;
-            volume_attempt(volume.clone(), geometry, &progress)
-        })
-        .unwrap_err();
+        let error =
+            scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, |timings| {
+                attempts += 1;
+                volume_attempt(volume.clone(), geometry, &progress, timings)
+            })
+            .unwrap_err();
         assert_eq!(attempts, 2);
         assert!(
             error.contains("child record 30, sequence 1")
@@ -1691,10 +1814,11 @@ fn successful_index_and_fatal_metadata_errors_never_trigger_the_parent_retry() {
         }
         let progress = Progress::default();
         let mut attempts = 0;
-        let result = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
-            attempts += 1;
-            volume_attempt(volume.clone(), geometry, &progress)
-        });
+        let result =
+            scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, |timings| {
+                attempts += 1;
+                volume_attempt(volume.clone(), geometry, &progress, timings)
+            });
         assert_eq!(attempts, 1);
         if fatal {
             assert!(
@@ -1714,9 +1838,9 @@ fn cancellation_after_a_parent_failure_does_not_restart_or_authorize_deletion() 
     put16(&mut volume, fixture_record_offset(31) + 16, 2);
     let progress = Progress::default();
     let mut attempts = 0;
-    let scan = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
+    let scan = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, |timings| {
         attempts += 1;
-        let result = volume_attempt(volume.clone(), geometry, &progress);
+        let result = volume_attempt(volume.clone(), geometry, &progress, timings);
         progress.cancel.store(true, Ordering::Relaxed);
         result
     })

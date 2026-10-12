@@ -17,7 +17,8 @@ fn main() -> Result<(), String> {
         let scan = mft::scan_file(Path::new("Z:\\"), &input, &Progress::default())?;
         timings.push(serde_json::json!({"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
             "read_ms":scan.stats.mft_read_seconds*1000.0,"tree_ms":scan.stats.tree_build_seconds*1000.0,
-            "nodes":scan.nodes.len(),"allocated":scan.nodes[0].allocated,"metadata_queries":scan.stats.file_metadata_queries}));
+            "nodes":scan.nodes.len(),"allocated":scan.nodes[0].allocated,"metadata_queries":scan.stats.file_metadata_queries,
+            "stages":scan.stats.mft_timings}));
     }
     println!(
         "{}",

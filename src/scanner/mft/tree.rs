@@ -91,10 +91,22 @@ pub(super) fn build(
             .ok_or("Unlinked allocation overflow")?;
     }
     records.retain(|r| !r.names.is_empty());
+    // Reserve by normalized names, including hard links, with at most one
+    // stream bucket per directory. This avoids copying a large node array.
+    let node_capacity = records
+        .iter()
+        .try_fold(0usize, |sum, record| {
+            sum.checked_add(record.names.len())
+                .and_then(|n| n.checked_add(usize::from(record.directory)))
+        })
+        .ok_or("NTFS node count overflow")?;
+    scan.nodes
+        .try_reserve_exact(node_capacity.saturating_sub(1))
+        .map_err(|_| "Insufficient memory for the NTFS tree")?;
     let mut dirs = HashMap::from([(root_ref, 0usize)]);
     let mut pending = vec![];
     for record in records
-        .iter()
+        .iter_mut()
         .filter(|r| r.directory && r.reference != root_ref)
     {
         if record.names.len() != 1 {
@@ -104,7 +116,7 @@ pub(super) fn build(
             return Err("Unsupported NTFS directory names".into());
         }
         let id = scan.nodes.len();
-        let mut node = Node::new(record.names[0].text.clone(), None, true);
+        let mut node = Node::new(std::mem::take(&mut record.names[0].text), None, true);
         directory_data(&mut node, record)?;
         scan.nodes.push(node);
         dirs.insert(record.reference, id);
