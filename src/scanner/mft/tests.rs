@@ -963,6 +963,7 @@ fn scan_volume_fixture<R: Read + std::io::Seek>(
         progress,
         "Volume fixture",
     )
+    .map_err(|error| error.to_string())
 }
 
 #[test]
@@ -1548,6 +1549,203 @@ fn rejects_reused_parent_and_extension_references() {
     put64(&mut bytes, 26 * 1024 + 32, (2 << 48) | 25);
     assert!(scan(bytes).is_err());
 }
+
+#[test]
+fn volume_parent_failure_reports_record_identities_without_private_names() {
+    let (mut volume, geometry) = external_list_volume();
+    put16(&mut volume, fixture_record_offset(31) + 16, 2);
+    let error = scan_external_list_volume(volume, geometry).unwrap_err();
+    eprintln!("Parent-reference failure: {error}");
+    assert!(error.contains("child record 30, sequence 1"), "{error}");
+    assert!(
+        error.contains("expected parent record 31, sequence 1"),
+        "{error}"
+    );
+    assert!(error.contains("scanned parent sequence 2"), "{error}");
+    assert!(!error.contains("Projects") && !error.contains("Artifacts"));
+}
+fn volume_attempt(
+    volume: Vec<u8>,
+    geometry: Geometry,
+    progress: &Progress,
+) -> Result<Scan, IndexError> {
+    let mut disk = Cursor::new(volume);
+    let mapping = bootstrap_fixture(&mut disk, geometry, progress)?;
+    let reader = MappedReader::with_bootstrap(&mut disk, mapping, geometry)?;
+    read_index_resolved(
+        reader,
+        Path::new("C:\\synthetic-fixture"),
+        geometry,
+        progress,
+        "Volume fixture",
+    )
+}
+
+#[test]
+fn live_parent_retry_restarts_the_complete_validated_pipeline_without_double_counting() {
+    let (volume, geometry) = external_list_volume();
+    let mut changed = volume.clone();
+    put16(&mut changed, fixture_record_offset(31) + 16, 2);
+    let progress = Progress::default();
+    let mut attempts = 0;
+    let scan = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
+        attempts += 1;
+        if attempts == 2 {
+            for counter in [
+                &progress.files,
+                &progress.folders,
+                &progress.bytes,
+                &progress.metadata_bytes,
+                &progress.metadata_total,
+                &progress.mft_records,
+            ] {
+                assert_eq!(counter.load(Ordering::Relaxed), 0);
+            }
+            assert!(!progress.cancelled());
+        }
+        volume_attempt(
+            if attempts == 1 {
+                changed.clone()
+            } else {
+                volume.clone()
+            },
+            geometry,
+            &progress,
+        )
+    })
+    .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(
+        (
+            scan.stats.files,
+            scan.stats.folders,
+            scan.stats.shared_links
+        ),
+        (10, 3, 1)
+    );
+    assert_eq!(scan.stats.mft_records, 64);
+    assert_eq!(
+        (scan.nodes[0].logical, scan.nodes[0].allocated),
+        (1141328, 94208)
+    );
+    assert!(
+        scan.stats
+            .notices
+            .iter()
+            .any(|notice| notice.contains("second read passed reference validation"))
+    );
+    assert!(!scan.deletion_eligible());
+}
+
+#[test]
+fn persistent_parent_mismatch_and_wrong_parent_type_fail_after_one_retry() {
+    for wrong_type in [false, true] {
+        let (mut volume, geometry) = external_list_volume();
+        if wrong_type {
+            put_volume_record(
+                &mut volume,
+                31,
+                &record(
+                    31,
+                    false,
+                    0,
+                    vec![filename(5, "Projects", 1), resident_attr(0x80, "", &[])],
+                ),
+            );
+        } else {
+            put16(&mut volume, fixture_record_offset(31) + 16, 2);
+        }
+        let progress = Progress::default();
+        let mut attempts = 0;
+        let error = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
+            attempts += 1;
+            volume_attempt(volume.clone(), geometry, &progress)
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert!(
+            error.contains("child record 30, sequence 1")
+                && error.contains("expected parent record 31, sequence 1"),
+            "{error}"
+        );
+        assert!(error.contains("fresh-index retry also failed"));
+        assert!(
+            error.contains(if wrong_type {
+                "not a directory"
+            } else {
+                "scanned parent sequence 2"
+            }),
+            "{error}"
+        );
+        assert!(!error.contains("Projects") && !error.contains("Artifacts"));
+    }
+}
+
+#[test]
+fn successful_index_and_fatal_metadata_errors_never_trigger_the_parent_retry() {
+    for fatal in [false, true] {
+        let (mut volume, geometry) = external_list_volume();
+        if fatal {
+            let offset = fixture_record_offset(20);
+            volume[offset..offset + 4].copy_from_slice(b"BAAD");
+        }
+        let progress = Progress::default();
+        let mut attempts = 0;
+        let result = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
+            attempts += 1;
+            volume_attempt(volume.clone(), geometry, &progress)
+        });
+        assert_eq!(attempts, 1);
+        if fatal {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("Unrecognized NTFS record at index 20")
+            );
+        } else {
+            assert_eq!(result.unwrap().nodes[0].allocated, 94208);
+        }
+    }
+}
+
+#[test]
+fn cancellation_after_a_parent_failure_does_not_restart_or_authorize_deletion() {
+    let (mut volume, geometry) = external_list_volume();
+    put16(&mut volume, fixture_record_offset(31) + 16, 2);
+    let progress = Progress::default();
+    let mut attempts = 0;
+    let scan = scan_live_with_retry(Path::new("C:\\synthetic-fixture"), &progress, || {
+        attempts += 1;
+        let result = volume_attempt(volume.clone(), geometry, &progress);
+        progress.cancel.store(true, Ordering::Relaxed);
+        result
+    })
+    .unwrap();
+    assert_eq!(attempts, 1);
+    assert!(scan.stats.cancelled && progress.cancelled());
+    assert_eq!(
+        scan.stats.runtime.provenance(),
+        crate::model::Provenance::Incomplete
+    );
+    assert!(!scan.deletion_eligible());
+    assert!(crate::recycle::Target::from_scan(&scan, 0).is_err());
+}
+
+#[test]
+fn saved_mft_parent_errors_keep_diagnostics_without_reading_or_retrying_a_live_drive() {
+    let mut bytes = fixture();
+    put16(&mut bytes, 31 * 1024 + 16, 2);
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), bytes).unwrap();
+    let error = scan_file(Path::new("C:\\"), file.path(), &Progress::default()).unwrap_err();
+    assert!(
+        error.contains("child record 30, sequence 1")
+            && error.contains("scanned parent sequence 2"),
+        "{error}"
+    );
+    assert!(!error.contains("fresh-index retry"));
+}
+
 #[test]
 fn rejects_disconnected_directory_cycle() {
     let mut bytes = fixture();

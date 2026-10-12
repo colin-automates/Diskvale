@@ -43,6 +43,8 @@ The [0.3.25 test candidate](ntfs-list-test-candidate.md) resolves complete, unco
 
 Flat saved-MFT files do not include external attribute-list clusters. Replay rejects those lists without accessing any live drive. Snapshot JSON saved after a completed live scan remains readable and cannot authorize deletion. The published v0.3.24 download still has the reported nonresident-list rejection; 0.3.25 publication is pending a successful scan of the failing drive.
 
+The [0.3.26 candidate](ntfs-parent-test-candidate.md) retries the complete live index read once if directory/file parent references are inconsistent. It queries fresh geometry and bootstraps/validates the complete index again; it does not repair sequence numbers, attach orphan nodes or omit failed records. Persistent failures identify child/parent record numbers and sequences without names or paths. Unrelated invalid metadata and saved-MFT replay do not trigger this live retry. The first C: test failed on 0.3.25; publication is still gated on that drive completing successfully.
+
 Large drives can require substantial memory. Full-volume correctness and performance parity with other disk tools has not been established. Live USN updates and duplicate-file discovery are not implemented.
 
 ## Source layout

@@ -49,3 +49,7 @@ Report the drive letter/filesystem and whether the whole scan completed. If it f
 Lists must have a complete, unnamed mapping in their base attribute, with no compression, sparse runs or encryption, and fit within the stated safety bounds. Concurrently changed bootstrap metadata is rejected with a rescan instruction. Flat-MFT replay cannot supply external volume clusters. Existing experimental-reader, memory, accounting and non-atomic live-scan limits remain; see [technical details](technical.md).
 
 Public release and announcement acceptance remain pending the real-drive result.
+
+## Follow-up from the C: live test
+
+The user tested the 0.3.25 candidate on C: and reported `NTFS directory parent is missing or reused; rescan the live volume`. This is a later tree-construction failure, so the drive has **not** passed acceptance. [The 0.3.26 parent-reference candidate](ntfs-parent-test-candidate.md) adds a bounded, fully validated live reread and numeric diagnostics for persistent failures. Do not publish either candidate based solely on automated tests.

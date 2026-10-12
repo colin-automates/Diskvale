@@ -1,4 +1,7 @@
-use super::format::{self, Record};
+use super::{
+    IndexError,
+    format::{self, Record},
+};
 use crate::{
     model::{Node, Scan, ScanStats},
     scanner::Progress,
@@ -10,7 +13,7 @@ pub(super) fn build(
     mut records: Vec<Record>,
     progress: &Progress,
     engine: &str,
-) -> Result<Scan, String> {
+) -> Result<Scan, IndexError> {
     let cancelled = progress.cancelled();
     let root_ref = records
         .iter()
@@ -72,7 +75,8 @@ pub(super) fn build(
                 "NTFS record {} has {} links but no file name",
                 format::slot(record.reference),
                 record.links
-            ));
+            )
+            .into());
         }
         scan.stats.unlinked_records += 1;
         scan.stats.unlinked_logical_bytes = scan
@@ -104,9 +108,9 @@ pub(super) fn build(
         directory_data(&mut node, record)?;
         scan.nodes.push(node);
         dirs.insert(record.reference, id);
-        pending.push((id, record.names[0].parent));
+        pending.push((id, record.reference, record.names[0].parent));
     }
-    for (id, parent) in pending {
+    for (id, child_reference, parent) in pending {
         if let Some(&parent) = dirs.get(&parent) {
             if parent == id && !cancelled {
                 return Err("Cyclic NTFS directory".into());
@@ -114,9 +118,16 @@ pub(super) fn build(
             scan.nodes[id].parent = Some(parent);
             scan.nodes[parent].children.push(id);
         } else if !cancelled {
-            return Err(
-                "NTFS directory parent is missing or reused; rescan the live volume".into(),
-            );
+            let observed = records
+                .iter()
+                .find(|record| format::slot(record.reference) == format::slot(parent))
+                .map(|record| (record.reference, record.directory, !record.names.is_empty()));
+            return Err(parent_reference_error(
+                "directory",
+                child_reference,
+                parent,
+                observed,
+            ));
         }
     }
     let mut seen = vec![false; scan.nodes.len()];
@@ -186,7 +197,8 @@ pub(super) fn build(
             return Err(format!(
                 "NTFS record {} has no file name",
                 format::slot(record.reference)
-            ));
+            )
+            .into());
         }
         let allocated = record.allocation()?;
         let logical = record.data.map_or(0, |s| s.0);
@@ -199,7 +211,16 @@ pub(super) fn build(
                     scan.stats.errors += 1;
                     continue;
                 }
-                return Err("NTFS file parent is missing or reused; rescan the live volume".into());
+                let observed = dirs
+                    .keys()
+                    .find(|&&reference| format::slot(reference) == format::slot(name.parent))
+                    .map(|&reference| (reference, true, true));
+                return Err(parent_reference_error(
+                    "file",
+                    record.reference,
+                    name.parent,
+                    observed,
+                ));
             };
             let mut node = Node::new(name.text, Some(parent), false);
             node.logical = logical;
@@ -236,4 +257,34 @@ pub(super) fn build(
     }
     scan.finish();
     Ok(scan)
+}
+
+fn parent_reference_error(
+    kind: &str,
+    child: u64,
+    parent: u64,
+    observed: Option<(u64, bool, bool)>,
+) -> IndexError {
+    let detail = match observed {
+        Some((reference, directory, named)) => format!(
+            "scanned parent sequence {} ({}; {})",
+            reference >> 48,
+            if directory {
+                "directory"
+            } else {
+                "not a directory"
+            },
+            if named { "has a name" } else { "has no name" }
+        ),
+        None => "parent absent from the scanned named directories".into(),
+    };
+    // Record numbers/sequences are diagnostic identifiers; never include paths
+    // or filenames in the error the user may share publicly.
+    IndexError::ParentReference(format!(
+        "NTFS {kind} parent is missing or reused (child record {}, sequence {}; expected parent record {}, sequence {}; {detail}); rescan the live volume",
+        format::slot(child),
+        child >> 48,
+        format::slot(parent),
+        parent >> 48
+    ))
 }

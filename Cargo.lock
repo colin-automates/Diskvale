@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "canopy"
-version = "0.3.25"
+version = "0.3.26"
 dependencies = [
  "csv",
  "eframe",

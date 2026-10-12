@@ -11,6 +11,29 @@ use std::{io::Read, path::Path, sync::atomic::Ordering, time::Instant};
 
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Debug)]
+enum IndexError {
+    ParentReference(String),
+    Invalid(String),
+}
+impl From<String> for IndexError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+impl From<&str> for IndexError {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.into())
+    }
+}
+impl std::fmt::Display for IndexError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParentReference(message) | Self::Invalid(message) => message.fmt(formatter),
+        }
+    }
+}
+
 fn read_index(
     reader: impl Read,
     root: &Path,
@@ -19,6 +42,7 @@ fn read_index(
     engine: &str,
 ) -> Result<Scan, String> {
     read_index_resolved(source::FlatIndex(reader), root, geometry, progress, engine)
+        .map_err(|error| error.to_string())
 }
 
 fn read_index_resolved(
@@ -27,7 +51,7 @@ fn read_index_resolved(
     geometry: source::Geometry,
     progress: &Progress,
     engine: &str,
-) -> Result<Scan, String> {
+) -> Result<Scan, IndexError> {
     geometry.validate()?;
     let started = Instant::now();
     progress
@@ -93,7 +117,7 @@ fn read_index_resolved(
             } else {
                 reader.validate_record(index, raw)?;
                 if raw.iter().any(|&b| b != 0) {
-                    return Err(format!("Unrecognized NTFS record at index {index}"));
+                    return Err(format!("Unrecognized NTFS record at index {index}").into());
                 }
             }
             index += 1;
@@ -157,6 +181,57 @@ fn read_index_resolved(
     Ok(scan)
 }
 
+// A changing live namespace can span multiple sequential chunks. Retry the
+// entire validated index once; never repair references or attach orphan nodes.
+// Saved-MFT replay deliberately does not enter this live-only path.
+#[cfg(any(windows, test))]
+fn scan_live_with_retry(
+    root: &Path,
+    progress: &Progress,
+    mut attempt: impl FnMut() -> Result<Scan, IndexError>,
+) -> Result<Scan, String> {
+    for number in 0..2 {
+        if progress.cancelled() {
+            return tree::build(root, vec![], progress, "Experimental NTFS MFT")
+                .map_err(|error| error.to_string());
+        }
+        match attempt() {
+            Ok(mut scan) => {
+                if number != 0 && !scan.stats.cancelled {
+                    scan.stats.notices.insert(0, "Repeated the live NTFS index read once after inconsistent parent references. The second read passed reference validation; this is not an atomic filesystem snapshot.".into());
+                }
+                return Ok(scan);
+            }
+            Err(_) if progress.cancelled() => {
+                return tree::build(root, vec![], progress, "Experimental NTFS MFT")
+                    .map_err(|error| error.to_string());
+            }
+            Err(IndexError::ParentReference(_)) if number == 0 => {
+                // Reset only progress for the discarded attempt, never cancellation.
+                for counter in [
+                    &progress.files,
+                    &progress.folders,
+                    &progress.bytes,
+                    &progress.metadata_bytes,
+                    &progress.metadata_total,
+                    &progress.mft_records,
+                ] {
+                    counter.store(0, Ordering::Relaxed);
+                }
+                progress.phase.store(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                return Err(if number == 0 {
+                    error.to_string()
+                } else {
+                    format!("{error}. The fresh-index retry also failed")
+                });
+            }
+        }
+    }
+    unreachable!("Both bounded attempts return or the first advances to the second")
+}
+
 /// Replay a flat saved MFT through the same bulk parser, using an ordinary file.
 pub fn scan_file(root: &Path, file: &Path, progress: &Progress) -> Result<Scan, String> {
     use std::io::{Seek, SeekFrom};
@@ -181,7 +256,8 @@ pub fn scan_volume(root: &Path, progress: &Progress) -> Result<Scan, String> {
     let started = Instant::now();
     let root = super::windows::display_path(root.to_path_buf());
     if progress.cancelled() {
-        return tree::build(&root, vec![], progress, "Experimental NTFS MFT");
+        return tree::build(&root, vec![], progress, "Experimental NTFS MFT")
+            .map_err(|error| error.to_string());
     }
     let mut volume = super::windows::volume_file(&root).map_err(volume_access_error)?;
     let root_handle = super::windows::identity_handle(&root, true)
@@ -189,14 +265,11 @@ pub fn scan_volume(root: &Path, progress: &Progress) -> Result<Scan, String> {
     let volume_serial = super::windows::handle_identity(&root_handle)
         .map_err(|e| format!("Cannot verify NTFS volume identity: {e}"))?
         .0;
-    let (geometry, mapping) = match source::volume_mapping(&mut volume, progress) {
-        Err(_) if progress.cancelled() => {
-            return tree::build(&root, vec![], progress, "Experimental NTFS MFT");
-        }
-        result => result?,
-    };
-    let reader = source::MappedReader::with_bootstrap(&mut volume, mapping, geometry)?;
-    let mut scan = read_index_resolved(reader, &root, geometry, progress, "Experimental NTFS MFT")?;
+    let mut scan = scan_live_with_retry(&root, progress, || {
+        let (geometry, mapping) = source::volume_mapping(&mut volume, progress)?;
+        let reader = source::MappedReader::with_bootstrap(&mut volume, mapping, geometry)?;
+        read_index_resolved(reader, &root, geometry, progress, "Experimental NTFS MFT")
+    })?;
     scan.stats.volume_serial = Some(volume_serial);
     scan.stats.runtime = crate::model::RuntimeState::new(if scan.stats.cancelled {
         crate::model::Provenance::Incomplete
