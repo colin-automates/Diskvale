@@ -19,6 +19,17 @@ struct EntryData {
 }
 
 pub fn scan_folder(root: PathBuf, progress: Arc<Progress>) -> Result<Scan, String> {
+    scan_folder_impl(root, progress, false)
+}
+
+#[cfg(windows)]
+pub(super) fn scan_fat_volume(root: PathBuf, progress: Arc<Progress>) -> Result<Scan, String> {
+    scan_folder_impl(root, progress, true)
+}
+
+fn scan_folder_impl(root: PathBuf, progress: Arc<Progress>, fat: bool) -> Result<Scan, String> {
+    #[cfg(not(windows))]
+    let _ = fat;
     #[cfg(windows)]
     let root = super::windows::display_path(root);
     let mut result = Scan {
@@ -85,10 +96,14 @@ pub fn scan_folder(root: PathBuf, progress: Arc<Progress>) -> Result<Scan, Strin
                 if metadata.is_file() {
                     #[cfg(windows)]
                     {
-                        let m = super::windows::measure(&path, attrs);
-                        entry.client_state.allocated = m.allocated;
-                        entry.client_state.identity = m.identity;
-                        entry.client_state.links = m.links;
+                        if fat {
+                            entry.client_state.allocated = super::windows::fat_allocation(&path);
+                        } else {
+                            let m = super::windows::measure(&path, attrs);
+                            entry.client_state.allocated = m.allocated;
+                            entry.client_state.identity = m.identity;
+                            entry.client_state.links = m.links;
+                        }
                     }
                     #[cfg(unix)]
                     {

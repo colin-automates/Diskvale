@@ -4,7 +4,7 @@ Diskvale is an early preview. Publish experimental builds as GitHub prereleases 
 
 ## Code signing policy
 
-See the [code signing policy](../CODE_SIGNING.md) and [SignPath setup](code-signing-setup.md). Existing 0.3.27 downloads are unsigned; Foundation approval and account configuration are pending. After setup, use **Prepare signed Windows release** from `main` for a new version, with a manual SignPath approval. Verify its signed artifact and use all assets from that run together. Signing changes the EXE hash, so provenance, ZIP and checksums must be generated after signature verification. Do not replace an existing release's unsigned assets or call a dry run signed.
+See the [code signing policy](../CODE_SIGNING.md) and [SignPath setup](code-signing-setup.md). Current 0.3.28 downloads are unsigned; no production signing certificate is configured. After an approved setup, use **Prepare signed Windows release** from `main` for a new version, with a manual SignPath approval. Verify its signed artifact and use all assets from that run together. Signing changes the EXE hash, so provenance, ZIP and checksums must be generated after signature verification. Do not replace an existing release's unsigned assets or call a dry run signed.
 
 ## Publication checks
 

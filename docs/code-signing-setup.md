@@ -1,6 +1,6 @@
 # Set up SignPath Foundation signing
 
-The [code signing policy](../CODE_SIGNING.md) records the intended arrangement. **Approval is pending. Existing 0.3.27 downloads are unsigned.** SignPath Foundation reviews applications; configuration alone cannot provide a production certificate.
+The [code signing policy](../CODE_SIGNING.md) records the proposed arrangement. **No Foundation approval or production certificate is active. Current 0.3.28 downloads are unsigned.** These are instructions for a future approved setup; configuration alone cannot provide a production certificate.
 
 1. Apply through [SignPath Foundation](https://signpath.org/apply.html). Supply the public repository, homepage/download page, functionality, honest adoption evidence and the maintainer's chosen account details. The maintainer must review and agree to the applicable terms and data processing. Keep personal contact details out of this repository. Foundation acceptance is discretionary, especially for a newly released project.
 2. After approval, enable MFA for the maintainer's SignPath and GitHub accounts. Configure a SignPath project for `colin-automates/Diskvale`, GitHub.com origin verification and GitHub-hosted Windows runners. Install the SignPath GitHub App only for this repository when required by the approved setup; review its permissions before granting access.

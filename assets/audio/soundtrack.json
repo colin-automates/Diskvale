@@ -1,0 +1,19 @@
+{
+  "title": "Sirens in Darkness",
+  "artist": "The Cynic Project",
+  "artist_urls": [
+    "https://cynicmusic.com/",
+    "https://pixelsphere.org/"
+  ],
+  "license": "CC0-1.0",
+  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "source_page": "https://opengameart.org/content/sirens-in-darkness",
+  "source_download": "https://opengameart.org/sites/default/files/012_Sirens_in_Darkness_0.mp3",
+  "original_sha256": "54c1abdd5ca5d67cf43c29bdf9d8332510dd1d74e8498569e5d9a2824a77079e",
+  "excerpt_file": "sirens-in-darkness-excerpt.mp3",
+  "excerpt_sha256": "597dcab4a2e1de94836d9fa47b27a4a902585cf6b4b69d972cca4b0af82ee742",
+  "excerpt_source_start_seconds": 12,
+  "excerpt_requested_duration_seconds": 30,
+  "excerpt_method": "MP3 stream copy; packet boundaries can round the trim by one audio frame",
+  "retrieved_date": "2026-10-12"
+}

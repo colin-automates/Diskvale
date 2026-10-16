@@ -1,11 +1,10 @@
 """Edit genuine Diskvale UI footage into a local 1080p product demo."""
+import hashlib
 import json
 import os
 import shutil
-import math
 import subprocess
 import sys
-import wave
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +21,8 @@ W, H, FPS = 1920, 1080, 30
 INTRO, TOUR, OUTRO = 2.5, 25, 2.5
 TOTAL = INTRO + TOUR + OUTRO
 EXPORT_NAME = "Diskvale-Demo-Short.mp4"
+AUDIO_ROOT = ROOT / "assets" / "audio"
+AUDIO_LUFS, AUDIO_TRUE_PEAK = -26, -2
 MINT, WHITE, MUTED = "#8BE5D0", "#E6EDEA", "#98ADB7"
 FONTS = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
 
@@ -162,67 +163,97 @@ def read_exact(pipe, count):
     return b"".join(parts)
 
 
-def make_audio():
-    """Original instrumental: soft plucks, warm chords and understated percussion."""
-    rate = 48000
-    samples = int(TOTAL * rate)
-    stereo = np.zeros((samples, 2), dtype=np.float64)
-    rng = np.random.default_rng(20261009)
-
-    def add(time, signal, gain=.1, pan=0):
-        start = int(time * rate)
-        if start >= samples:
-            return
-        stop = min(start + len(signal), samples)
-        signal = signal[:stop - start] * gain
-        stereo[start:stop, 0] += signal * math.sqrt((1 - pan) / 2)
-        stereo[start:stop, 1] += signal * math.sqrt((1 + pan) / 2)
-
-    beat = 60 / 108
-    chords = [(50, 57, 62, 66), (47, 54, 59, 62), (43, 50, 55, 59), (45, 52, 57, 61)]
-    hz = lambda midi: 440 * 2 ** ((midi - 69) / 12)
-    for bar in range(math.ceil(TOTAL / (beat * 4))):
-        notes = chords[bar % 4]
-        t = np.arange(int(beat * 4.4 * rate)) / rate
-        env = (1 - np.exp(-t * 7)) * np.exp(-t * .8)
-        pad = sum(np.sin(2 * math.pi * hz(n) * t) + .2 * np.sin(2 * math.pi * hz(n) * 2.002 * t) for n in notes) / 4
-        add(bar * beat * 4, pad * env, .072, (-.12, .12)[bar % 2])
-        for step in range(8):
-            t = np.arange(int(.7 * rate)) / rate
-            frequency = hz(notes[(step * 3) % 4] + 12)
-            pluck = (np.sin(2 * math.pi * frequency * t) + .22 * np.sin(2 * math.pi * frequency * 2 * t))
-            pluck *= np.minimum(t * 200, 1) * np.exp(-t * 7)
-            add(bar * beat * 4 + step * beat / 2, pluck, .065, (-.35, .35)[step % 2])
-    for step in range(math.ceil(TOTAL / beat)):
-        t = np.arange(int(.2 * rate)) / rate
-        kick = np.sin(2 * math.pi * (48 * t + 48 * .035 * (1 - np.exp(-t / .035)))) * np.exp(-t * 25)
-        add(step * beat, kick, .07)
-        t = np.arange(int(.07 * rate)) / rate
-        noise = rng.normal(size=len(t))
-        hat = np.concatenate(([0], np.diff(noise))) * np.exp(-t * 80)
-        add(step * beat + beat / 2, hat, .008, .25)
-    # Clicks mapped to the trimmed tour, so the score follows the actual input.
-    for moment in (INTRO + 4.9, INTRO + 9.1, INTRO + 17.7, INTRO + 22.4):
-        t = np.arange(int(.06 * rate)) / rate
-        click = np.sin(2 * math.pi * 750 * t) * np.exp(-t * 100)
-        add(moment, click, .035)
-    time = np.arange(samples) / rate
-    stereo *= np.minimum(time / 1.3, 1)[:, None] * np.clip((TOTAL - time) / 1.7, 0, 1)[:, None]
-    stereo *= .62 / max(np.abs(stereo).max(), .001)
-    with wave.open(str(OUT / "original-score.wav"), "wb") as wav:
-        wav.setnchannels(2)
-        wav.setsampwidth(2)
-        wav.setframerate(rate)
-        wav.writeframes((np.clip(stereo, -1, 1) * 32767).astype("<i2").tobytes())
-
-
 def finish_audio():
-    make_audio()
+    """Mix quiet CC0 music with recorded mouse presses at visible UI actions."""
+    music = json.loads((AUDIO_ROOT / "soundtrack.json").read_text(encoding="utf-8"))
+    track = AUDIO_ROOT / music["excerpt_file"]
+    if hashlib.sha256(track.read_bytes()).hexdigest() != music["excerpt_sha256"]:
+        raise ValueError("Soundtrack does not match its source manifest")
+    fade_in, fade_out = 1.3, 2.5
+    bed = (f"atrim=duration={TOTAL},asetpts=PTS-STARTPTS,"
+           f"afade=t=in:st=0:d={fade_in},afade=t=out:st={TOTAL-fade_out}:d={fade_out}")
+    target = f"loudnorm=I={AUDIO_LUFS}:TP={AUDIO_TRUE_PEAK}:LRA=9"
+    measured = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", str(track),
+                               "-af", f"{bed},{target}:print_format=json", "-f", "null", "-"],
+                              capture_output=True, text=True, check=True)
+    levels = json.loads(measured.stderr[measured.stderr.rfind("{"):measured.stderr.rfind("}")+1])
+    # Normalize only the music. Normalizing the finished mix would raise the bed
+    # again when the short mouse transients are added.
+    normalizer = (f"{target}:measured_I={levels['input_i']}:measured_TP={levels['input_tp']}:"
+                  f"measured_LRA={levels['input_lra']}:measured_thresh={levels['input_thresh']}:"
+                  f"offset={levels['target_offset']}:linear=true")
+    music_bed = OUT / "music-bed.wav"
+    subprocess.run([FF, "-y", "-v", "error", "-i", str(track), "-af", f"{bed},{normalizer}",
+                    "-ar", "48000", "-ac", "2", "-c:a", "pcm_s24le", str(music_bed)], check=True)
+
+    def decode(path, channels, filters=None):
+        command = [FF, "-v", "error", "-i", str(path)]
+        if filters:
+            command += ["-af", filters]
+        result = subprocess.run(command + ["-ar", "48000", "-ac", str(channels), "-f", "f32le", "-"],
+                                capture_output=True, check=True)
+        return np.frombuffer(result.stdout, dtype="<f4").reshape(-1, channels)
+
+    music_samples = decode(music_bed, 2)
+    samples = round(TOTAL * 48000)
+    if len(music_samples) != samples:
+        raise ValueError("Music must cover the complete 30-second edit")
+    clicks = json.loads((AUDIO_ROOT / "clicks.json").read_text(encoding="utf-8"))
+    recordings = {}
+    for recording in clicks["files"]:
+        path = AUDIO_ROOT / recording["file"]
+        if hashlib.sha256(path.read_bytes()).hexdigest() != recording["sha256"]:
+            raise ValueError("Mouse recording does not match its source manifest")
+        sound = decode(path, 1, f"highpass=f={clicks['highpass_hz']},lowpass=f={clicks['lowpass_hz']}")
+        peak = float(np.max(np.abs(sound)))
+        if not peak:
+            raise ValueError("Mouse recording is silent")
+        target_peak = clicks[f"{recording['action']}_peak_dbfs"]
+        recordings[recording["action"]] = sound * (10 ** (target_peak / 20) / peak)
+
+    # The edit's source-frame mapping keeps cues on retained clicks. The press
+    # and release are one frame apart, exactly as in the capture's input events.
+    source_frames = [source_frame_for(i) for i in range(round(TOUR * FPS))]
+    click_samples = np.zeros_like(music_samples)
+    events = []
+    for cue in clicks["cues"]:
+        capture_frame = round(cue["capture_seconds"] * FPS)
+        video_frame = round(INTRO * FPS) + source_frames.index(capture_frame)
+        if source_frames[source_frames.index(capture_frame) + 1] != capture_frame + 1:
+            raise ValueError("The edit cuts away the mouse release")
+        for action, frame_offset in (("press", 0), ("release", 1)):
+            sound = recordings[action]
+            start = round((video_frame + frame_offset) * 48000 / FPS)
+            if start + len(sound) > samples:
+                raise ValueError("Mouse recording extends beyond the edit")
+            click_samples[start:start+len(sound)] += sound
+        events.append(dict(action=cue["action"], capture_frame=capture_frame, video_frame=video_frame,
+                           press_seconds=video_frame / FPS, release_seconds=(video_frame + 1) / FPS))
+    mixed = music_samples + click_samples
+    if float(np.max(np.abs(mixed))) >= 1:
+        raise ValueError("Soundtrack would clip; lower the mix levels")
+
+    def save_wave(path, audio):
+        subprocess.run([FF, "-y", "-v", "error", "-f", "f32le", "-ar", "48000", "-ac", "2", "-i", "-",
+                        "-c:a", "pcm_s24le", str(path)], input=audio.astype("<f4").tobytes(), check=True)
+
+    click_stem = OUT / "recorded-clicks.wav"
+    mixed_track = OUT / "mixed-soundtrack.wav"
+    save_wave(click_stem, click_samples)
+    save_wave(mixed_track, mixed)
+    video = OUT / EXPORT_NAME
     subprocess.run([FF, "-y", "-v", "error", "-i", str(OUT / "picture.mp4"),
-                    "-i", str(OUT / "original-score.wav"), "-map", "0:v:0", "-map", "1:a:0",
-                    "-c:v", "copy", "-af", "loudnorm=I=-18:TP=-2:LRA=9", "-c:a", "aac", "-ar", "48000", "-b:a", "192k",
-                    "-map_metadata", "-1", "-movflags", "+faststart", "-shortest",
-                    str(OUT / EXPORT_NAME)], check=True)
+                    "-i", str(mixed_track), "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "copy", "-c:a", "aac", "-ar", "48000",
+                    "-ac", "2", "-b:a", "192k", "-t", str(TOTAL),
+                    "-map_metadata", "-1", "-movflags", "+faststart", str(video)], check=True)
+    audio = dict(music=music, target_lufs=AUDIO_LUFS, fade_in_seconds=fade_in,
+                 fade_out_seconds=fade_out, added_click_effects=len(events), added_synthesized_score=False,
+                 clicks=clicks, click_events=events,
+                 music_bed_sha256=hashlib.sha256(music_bed.read_bytes()).hexdigest(),
+                 click_stem_sha256=hashlib.sha256(click_stem.read_bytes()).hexdigest(),
+                 video_sha256=hashlib.sha256(video.read_bytes()).hexdigest())
+    (OUT / "audio-manifest.json").write_text(json.dumps(audio, indent=2), encoding="utf-8")
     print(f"Finished {EXPORT_NAME}", flush=True)
 
 

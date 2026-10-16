@@ -74,12 +74,16 @@ Source commit: $sourceCommit
 
 1. Extract this ZIP into a folder.
 2. Open Diskvale.exe and approve the Windows administrator prompt.
-3. Choose an NTFS drive and click Scan. Use Rescan to refresh the results.
+3. Choose an NTFS, exFAT or FAT32 drive and click Scan drive.
+   For newly connected external drives, choose Refresh drives first.
+   Use Rescan to refresh results. Opening the app does not start a scan.
 
-Windows 10/11 x64, a whole NTFS drive and administrator access are required.
+Windows 10/11 x64, a whole local drive and administrator access are required.
 No installer, development tools or separate Visual C++ runtime are needed.
 $signatureInfo
 The NTFS reader is experimental; unsupported metadata returns an explicit error.
+exFAT/FAT32 uses a slower read-only metadata scan. Its file totals exclude
+directory allocation and filesystem metadata; deletion is disabled for those scans.
 Large drives may need substantial memory. Full-volume correctness and performance
 parity with other tools have not been established.
 

@@ -1,0 +1,45 @@
+{
+  "title": "Middle Mouse Click",
+  "artist": "1j01",
+  "source_page": "https://opengameart.org/content/middle-mouse-click",
+  "license": "CC0-1.0",
+  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "recording_method": "Physical mouse held near a microphone; uploader applied noise reduction and endpoint fades",
+  "files": [
+    {
+      "action": "press",
+      "file": "middle-click-press.wav",
+      "source_download": "https://opengameart.org/sites/default/files/middle-click-press.wav",
+      "sha256": "8a0ec2e7341f70b33f0802aadeb6a0689aed893048a600bfd46b1a6716fbe8fe"
+    },
+    {
+      "action": "release",
+      "file": "middle-click-release.wav",
+      "source_download": "https://opengameart.org/sites/default/files/middle-click-release.wav",
+      "sha256": "189005834fc3fef2fd4f024d503fbf98d313111b86bbf9904808aa276383a0f3"
+    }
+  ],
+  "cues": [
+    {
+      "capture_seconds": 7.4,
+      "action": "Select Media folder"
+    },
+    {
+      "capture_seconds": 15.2,
+      "action": "Open Files view"
+    },
+    {
+      "capture_seconds": 27.8,
+      "action": "Open Types view"
+    },
+    {
+      "capture_seconds": 35.8,
+      "action": "Isolate Media category"
+    }
+  ],
+  "press_peak_dbfs": -18,
+  "release_peak_dbfs": -22,
+  "highpass_hz": 120,
+  "lowpass_hz": 5000,
+  "retrieved_date": "2026-10-12"
+}

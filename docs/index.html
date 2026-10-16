@@ -3,22 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="See what is taking up space with Diskvale, an open-source Windows disk explorer. Watch the demo and download the v0.3.27 early preview for NTFS drives.">
+  <meta name="description" content="See what is taking up space with Diskvale, an open-source Windows disk explorer. Watch the demo and download the v0.3.28 early preview for internal and external NTFS, exFAT and FAT32 drives.">
   <meta name="theme-color" content="#101b21">
   <link rel="canonical" href="https://colin-automates.github.io/Diskvale/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Diskvale">
   <meta property="og:title" content="Diskvale — See what is taking up space">
-  <meta property="og:description" content="An open-source Windows disk explorer. Explore a drive visually, find large files and compare snapshots. Download the v0.3.27 early preview.">
+  <meta property="og:description" content="An open-source Windows disk explorer. Explore a drive visually, find large files and compare snapshots. Download the v0.3.28 early preview.">
   <meta property="og:url" content="https://colin-automates.github.io/Diskvale/">
   <meta property="og:image" content="https://colin-automates.github.io/Diskvale/media/demo-poster.png">
   <meta property="og:image:alt" content="Diskvale's native disk map with generated demo drive data">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Diskvale — See what is taking up space">
-  <meta name="twitter:description" content="An open-source Windows disk explorer. Watch the actual interface and download the v0.3.27 early preview. NTFS and administrator access required.">
+  <meta name="twitter:description" content="An open-source Windows disk explorer. Watch the actual interface and download the v0.3.28 early preview. NTFS, exFAT or FAT32; administrator access required.">
   <meta name="twitter:image" content="https://colin-automates.github.io/Diskvale/media/demo-poster.png">
   <meta name="twitter:image:alt" content="Diskvale's native disk map with generated demo drive data">
-  <title>Diskvale — Windows disk explorer · v0.3.27 early preview</title>
+  <title>Diskvale — Windows disk explorer · v0.3.28 early preview</title>
   <style>
     :root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; background: #101b21; color: #eaf4f2; }
     * { box-sizing: border-box; }
@@ -51,29 +51,29 @@
   <main>
     <header><h1>Diskvale</h1><p>Disk space, clearly.</p></header>
     <section class="intro" aria-labelledby="benefit">
-      <p class="release">v0.3.27 · Early preview · Open source / MIT</p>
+      <p class="release">v0.3.28 · Early preview · Open source / MIT</p>
       <h2 id="benefit">See what is taking up space.</h2>
-      <p>A native Windows disk explorer that turns a whole NTFS drive into an interactive map. Find large files, explore file types, search, and compare saved scans.</p>
+      <p>A native Windows disk explorer that turns an internal or external NTFS, exFAT or FAT32 drive into an interactive map. Find large files, explore file types, search, and compare saved scans.</p>
     </section>
     <nav aria-label="Project links">
-      <a href="https://github.com/colin-automates/Diskvale/releases/download/v0.3.27/Diskvale-windows-x64.zip">Download Windows ZIP · v0.3.27</a>
-      <a href="https://github.com/colin-automates/Diskvale/releases/tag/v0.3.27">Release notes &amp; EXE</a>
+      <a href="https://github.com/colin-automates/Diskvale/releases/download/v0.3.28/Diskvale-windows-x64.zip">Download Windows ZIP · v0.3.28</a>
+      <a href="https://github.com/colin-automates/Diskvale/releases/tag/v0.3.28">Release notes &amp; EXE</a>
       <a href="https://github.com/colin-automates/Diskvale">Source and documentation</a>
       <a href="https://github.com/colin-automates/Diskvale/issues/new?template=bug_report.yml">Report a bug</a>
     </nav>
-    <p class="requirements">Early preview · Windows x64 · NTFS · Administrator required</p>
-    <p class="notice">Windows 10/11 x64. Unsigned build: Windows may show an unknown-publisher warning. Extract the ZIP, open Diskvale.exe, then choose a drive and click Scan. No development tools needed.</p>
+    <p class="requirements">Early preview · Windows x64 · NTFS / exFAT / FAT32 · Administrator required</p>
+    <p class="notice">Windows 10/11 x64. Unsigned build: Windows may show an unknown-publisher warning. Extract the ZIP, open Diskvale.exe, then choose a drive and click Scan drive. Use Refresh drives for newly connected devices. No development tools needed.</p>
     <figure>
       <video controls playsinline preload="metadata" poster="media/demo-poster.png" width="1920" height="1080" aria-label="Diskvale product demo" aria-describedby="demo-caption">
         <source src="media/diskvale-demo.mp4" type="video/mp4">
         <a href="media/diskvale-demo.mp4">Download the demo video</a>
       </video>
-      <figcaption id="demo-caption">30-second tour of the actual application using generated drive data. Counts and timings are illustrative, not benchmarks. The interface is retained in v0.3.27, which reduces scan allocation work and adds stage timings to Scan notes. <a href="media/diskvale-demo.mp4" download="Diskvale-Demo.mp4">Download video</a>.</figcaption>
+      <figcaption id="demo-caption">30-second tour of the actual application using generated drive data. Counts and timings are illustrative, not benchmarks. The interface is retained in v0.3.28, which also supports external exFAT/FAT32 drives. <a href="media/diskvale-demo.mp4" download="Diskvale-Demo.mp4">Download video</a>. Music: <a href="https://opengameart.org/content/sirens-in-darkness">Sirens in Darkness by The Cynic Project</a>. Mouse clicks: <a href="https://opengameart.org/content/middle-mouse-click">1j01</a>. Both recordings are CC0.</figcaption>
     </figure>
     <footer>
-      <p>The NTFS reader is experimental. Unsupported or incomplete metadata returns an error; large scans can require substantial memory. Full-volume correctness and performance parity have not been established. Deletion uses best-effort identity checks and explicit confirmation.</p>
-      <p><a href="https://github.com/colin-automates/Diskvale/blob/main/docs/technical.md">Technical details &amp; safety limits</a> · <a href="https://github.com/colin-automates/Diskvale/blob/main/docs/build.md">Build from source</a> · <a href="https://github.com/colin-automates/Diskvale/blob/main/CONTRIBUTING.md">Contribute</a> · <a href="https://github.com/colin-automates/Diskvale/releases/download/v0.3.27/SHA256SUMS.txt">Checksums</a> · <a href="https://github.com/colin-automates/Diskvale/blob/main/CODE_SIGNING.md">Code signing policy</a></p>
-      <p>SignPath Foundation setup is in progress. The current v0.3.27 download is unsigned.</p>
+      <p>NTFS uses an experimental index reader; exFAT/FAT32 uses a slower folder scan with deletion disabled. Unsupported or incomplete NTFS metadata returns an error; large scans can require substantial memory. Full-volume correctness and performance parity have not been established. Deletion uses best-effort identity checks and explicit confirmation.</p>
+      <p><a href="https://github.com/colin-automates/Diskvale/blob/main/docs/technical.md">Technical details &amp; safety limits</a> · <a href="https://github.com/colin-automates/Diskvale/blob/main/docs/build.md">Build from source</a> · <a href="https://github.com/colin-automates/Diskvale/blob/main/CONTRIBUTING.md">Contribute</a> · <a href="https://github.com/colin-automates/Diskvale/releases/download/v0.3.28/SHA256SUMS.txt">Checksums</a> · <a href="https://github.com/colin-automates/Diskvale/blob/main/CODE_SIGNING.md">Code signing policy</a></p>
+      <p>The current v0.3.28 download is unsigned; no production signing certificate is configured.</p>
       <p>Snapshots and CSVs contain filenames and paths. Redact reports and screenshots; do not attach full drive captures by default.</p>
     </footer>
   </main>

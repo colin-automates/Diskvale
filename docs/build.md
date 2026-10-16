@@ -44,10 +44,19 @@ From an administrator terminal:
 .\Diskvale.exe --path "C:\" --compact
 .\Diskvale.exe --path "C:\" --auto-scan
 .\Diskvale.exe --scan "C:\" --json scan.json --csv files.csv > scan-summary.json
+.\Diskvale.exe --path "E:\" --compact
 .\Diskvale.exe --snapshot scan.json --view largest
 ```
 
 `--compact` uses a 1050×700 window; `--view largest` and `--view types` choose a results tab. `--focus "Projects"` focuses a relative path within loaded results. The release uses the Windows GUI subsystem; redirect output for headless scans. `--mft-file saved.mft` is a diagnostic parser input; `--snapshot scan.json` opens saved results. The production executable still requires an administrator token for these modes.
 
+Diskvale v0.3.28 accepts whole local NTFS, exFAT and FAT32 drives. NTFS uses the MFT; exFAT/FAT32 uses read-only directory enumeration and cannot authorize deletion. The opt-in test below reads metadata from the explicitly named exFAT/FAT32 drive, requests cancellation after 30 seconds, writes nothing to that drive, and reports only aggregate counts. A cancelled scan returns a partial result after in-flight metadata calls finish. It is not part of ordinary test runs:
 
-See [release maintenance](release.md) for publication and public-download verification. Download the current [v0.3.27 early preview](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.27).
+```powershell
+$env:DISKVALE_READ_ONLY_DRIVE = 'E:\'
+cargo test --locked --test external_drive explicit_external_drive_reads_metadata_without_deletion_authority -- --exact --ignored --nocapture
+Remove-Item Env:DISKVALE_READ_ONLY_DRIVE
+```
+
+
+See [release maintenance](release.md) for publication and public-download verification. Download the current [v0.3.28 early preview](https://github.com/colin-automates/Diskvale/releases/tag/v0.3.28).

@@ -1,8 +1,8 @@
 # Code signing policy
 
-**Status: setup in progress; SignPath Foundation approval and account configuration are required. Diskvale 0.3.27 is unsigned.** No signed release is advertised until its public EXE passes Windows signature verification.
+**Status: no production signing service or certificate is configured. Diskvale 0.3.28 is unsigned.** No signed release is advertised until its public EXE passes Windows signature verification.
 
-The intended service, subject to approval, is: **Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).** Foundation certificates identify SignPath Foundation as the publisher. This statement describes the proposed arrangement, not an active certificate or endorsement.
+If a future Foundation application is approved, the proposed service would be: **Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).** Foundation certificates identify SignPath Foundation as the publisher. No Foundation certificate or active endorsement is currently in place.
 
 ## Responsibility
 

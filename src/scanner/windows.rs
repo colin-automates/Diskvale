@@ -16,6 +16,7 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE, SetLastError,
     },
     Storage::FileSystem::*,
+    System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE},
 };
 
 #[derive(Debug)]
@@ -167,6 +168,7 @@ pub struct Drive {
     pub filesystem: String,
     pub total: u64,
     pub free: u64,
+    pub serial: u32,
 }
 
 pub fn volume_space(root: &Path) -> Option<(u64, u64)> {
@@ -230,49 +232,99 @@ pub fn is_volume_root(path: &Path) -> bool {
     let raw = display_path(path.to_path_buf())
         .to_string_lossy()
         .to_string();
-    raw.len() == 3 && raw.as_bytes()[1] == b':' && raw.ends_with('\\')
+    raw.len() == 3
+        && raw.as_bytes()[0].is_ascii_alphabetic()
+        && raw.as_bytes()[1] == b':'
+        && raw.ends_with('\\')
 }
+
+fn local_drive_type(kind: u32) -> bool {
+    matches!(kind, DRIVE_FIXED | DRIVE_REMOVABLE)
+}
+
+/// Avoid Windows "insert a disk" dialogs for empty removable devices.
+struct MediaErrorMode(u32);
+impl MediaErrorMode {
+    fn new() -> Self {
+        use windows_sys::Win32::System::Diagnostics::Debug::*;
+        let old = unsafe { GetThreadErrorMode() };
+        unsafe {
+            SetThreadErrorMode(old | SEM_FAILCRITICALERRORS, ptr::null_mut());
+        }
+        Self(old)
+    }
+}
+impl Drop for MediaErrorMode {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::SetThreadErrorMode(
+                self.0,
+                ptr::null_mut(),
+            );
+        }
+    }
+}
+
+/// Ready local volumes, including external disks reported as fixed or removable.
+pub fn drive(root: &Path) -> io::Result<Drive> {
+    let _mode = MediaErrorMode::new();
+    if !is_volume_root(root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Scanning requires a whole local drive.",
+        ));
+    }
+    let root = display_path(root.to_path_buf());
+    let w = wide(&root);
+    if !local_drive_type(unsafe { GetDriveTypeW(w.as_ptr()) }) {
+        return Err(io::Error::other(
+            "Choose a connected local disk or removable drive.",
+        ));
+    }
+    let mut label = [0u16; 261];
+    let mut fs = [0u16; 64];
+    let mut serial = 0;
+    if unsafe {
+        GetVolumeInformationW(
+            w.as_ptr(),
+            label.as_mut_ptr(),
+            label.len() as u32,
+            &mut serial,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            fs.as_mut_ptr(),
+            fs.len() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let (total, free) = volume_space(&root).ok_or_else(io::Error::last_os_error)?;
+    let string = |s: &[u16]| {
+        String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())])
+    };
+    Ok(Drive {
+        root,
+        label: string(&label),
+        filesystem: string(&fs),
+        total,
+        free,
+        serial,
+    })
+}
+
 pub fn drives() -> Vec<Drive> {
     let mut drives = vec![];
-    // No probing removable/network devices: they can block while disconnected.
+    // Called by a background discovery worker. Never probe network or optical devices.
     let mask = unsafe { GetLogicalDrives() };
     for i in 0..26 {
         if mask & (1 << i) == 0 {
             continue;
         }
         let root = PathBuf::from(format!("{}:\\", char::from(b'A' + i)));
-        let w = wide(&root);
-        if unsafe { GetDriveTypeW(w.as_ptr()) } != 3 {
-            continue;
+        if let Ok(drive) = drive(&root) {
+            drives.push(drive);
         }
-        let (mut total, mut free, mut available) = (0, 0, 0);
-        if unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut available, &mut total, &mut free) } == 0 {
-            continue;
-        }
-        let mut label = [0u16; 261];
-        let mut fs = [0u16; 64];
-        unsafe {
-            GetVolumeInformationW(
-                w.as_ptr(),
-                label.as_mut_ptr(),
-                label.len() as u32,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                fs.as_mut_ptr(),
-                fs.len() as u32,
-            );
-        }
-        let string = |s: &[u16]| {
-            String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())])
-        };
-        drives.push(Drive {
-            root,
-            label: string(&label),
-            filesystem: string(&fs),
-            total,
-            free,
-        });
     }
     drives
 }
@@ -287,6 +339,38 @@ pub struct Measurement {
 pub fn measure(path: &Path, attrs: u32) -> Measurement {
     let w = wide(&extended_path(path));
     measure_path(&w, attrs)
+}
+
+/// exFAT/FAT files have no resident data or hard links. Ask Windows for the
+/// allocation directly, without NTFS-specific extent and identity queries.
+pub(super) fn fat_allocation(path: &Path) -> Option<u64> {
+    let w = wide(&extended_path(path));
+    let handle = unsafe {
+        CreateFileW(
+            w.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let handle = DirectoryHandle(handle);
+    let mut standard: FILE_STANDARD_INFO = unsafe { zeroed() };
+    (unsafe {
+        GetFileInformationByHandleEx(
+            handle.0,
+            FileStandardInfo,
+            &mut standard as *mut _ as _,
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    } != 0
+        && standard.AllocationSize >= 0)
+        .then_some(standard.AllocationSize as u64)
 }
 
 pub fn extended_path(path: &Path) -> PathBuf {
@@ -621,6 +705,22 @@ pub fn ntfs_record(file: &File, reference: u64, record_size: usize) -> io::Resul
 mod allocation_tests {
     use super::*;
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::System::WindowsProgramming::{
+        DRIVE_CDROM, DRIVE_RAMDISK, DRIVE_REMOTE,
+    };
+
+    #[test]
+    fn external_fixed_and_removable_drives_are_supported_but_not_network_or_optical() {
+        assert!(local_drive_type(DRIVE_FIXED));
+        assert!(local_drive_type(DRIVE_REMOVABLE));
+        for kind in [0, 1, DRIVE_REMOTE, DRIVE_CDROM, DRIVE_RAMDISK] {
+            assert!(!local_drive_type(kind));
+        }
+        assert!(is_volume_root(Path::new("E:\\")));
+        for path in ["E:", "E:\\folder", "1:\\", "\\\\server\\share\\"] {
+            assert!(!is_volume_root(Path::new(path)));
+        }
+    }
 
     #[test]
     fn denied_extent_query_uses_path_metadata_instead_of_losing_allocation() {

@@ -150,28 +150,23 @@ pub struct Canopy {
     by_modified: bool,
     #[cfg(windows)]
     drives: Vec<scanner::windows::Drive>,
+    #[cfg(windows)]
+    drive_receiver: Option<mpsc::Receiver<Vec<scanner::windows::Drive>>>,
 }
 
 impl Canopy {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_ui(&cc.egui_ctx);
         let args: Vec<_> = std::env::args().collect();
-        #[cfg(windows)]
-        let drives = scanner::windows::drives();
         let path = args
             .iter()
             .position(|a| a == "--path")
             .and_then(|i| args.get(i + 1))
             .cloned()
             .unwrap_or_else(|| {
-                #[cfg(windows)]
-                if let Some(drive) = drives
-                    .iter()
-                    .find(|drive| drive.filesystem.eq_ignore_ascii_case("NTFS"))
-                {
-                    return drive.root.display().to_string();
-                }
-                "C:\\".into()
+                std::env::var("SystemDrive")
+                    .map(|drive| format!("{drive}\\"))
+                    .unwrap_or_else(|_| "C:\\".into())
             });
         let mut app = Self {
             io_job: None,
@@ -249,8 +244,12 @@ impl Canopy {
             scan_stale: false,
             by_modified: false,
             #[cfg(windows)]
-            drives,
+            drives: vec![],
+            #[cfg(windows)]
+            drive_receiver: None,
         };
+        #[cfg(windows)]
+        app.refresh_drives(cc.egui_ctx.clone());
         if let Some(file) = args
             .iter()
             .position(|a| a == "--snapshot")
@@ -261,6 +260,18 @@ impl Canopy {
             app.start_scan(cc.egui_ctx.clone());
         }
         app
+    }
+    #[cfg(windows)]
+    fn refresh_drives(&mut self, ctx: egui::Context) {
+        if self.drive_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.drive_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(scanner::windows::drives());
+            ctx.request_repaint();
+        });
     }
     fn load_scan(&mut self, ctx: egui::Context, path: PathBuf) {
         if self.receiver.is_some() || self.deletion.is_some() || self.delete_pending.is_some() {
@@ -305,7 +316,7 @@ impl Canopy {
         let root = PathBuf::from(self.path.trim());
         self.scan_error = None;
         if root.as_os_str().is_empty() {
-            self.message = "Choose a whole NTFS drive.".into();
+            self.message = "Choose a whole NTFS, exFAT or FAT32 drive.".into();
             return;
         }
         self.progress = Arc::new(Progress::default());
@@ -325,13 +336,31 @@ impl Canopy {
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| run_ui_scan(root, progress, mft_file))
                 .unwrap_or_else(|_| {
-                    Err("The scanner stopped unexpectedly. Please rescan the NTFS drive.".into())
+                    Err("The scanner stopped unexpectedly. Please rescan the drive.".into())
                 });
             let _ = sender.send((request, result));
             ctx.request_repaint();
         });
     }
     fn poll(&mut self) {
+        #[cfg(windows)]
+        if let Some(outcome) =
+            self.drive_receiver
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(drives) => Some(Ok(drives)),
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                })
+        {
+            self.drive_receiver = None;
+            match outcome {
+                Ok(drives) => self.drives = drives,
+                Err(()) => {
+                    self.message = "Drive discovery stopped. Choose Refresh drives to retry.".into()
+                }
+            }
+        }
         if let Some(outcome) = self
             .io_job
             .as_ref()
@@ -978,6 +1007,9 @@ impl Canopy {
                 if old.root != scan.root {
                     return Err("Choose a snapshot of the same drive.".into());
                 }
+                if !old.stats.filesystem.as_deref().unwrap_or("NTFS").eq_ignore_ascii_case(scan.stats.filesystem.as_deref().unwrap_or("NTFS")) {
+                    return Err("Snapshot filesystems differ. Compare captures made with the same filesystem and scan method.".into());
+                }
                 if old.stats.directory_streams_captured != scan.stats.directory_streams_captured {
                     return Err("Snapshot accounting differs: legacy captures omit directory streams. Compare captures with the same accounting profile or rescan.".into());
                 }
@@ -1164,9 +1196,9 @@ fn run_ui_scan(
     if let Some(file) = mft_file {
         scanner::mft::scan_file(&root, &file, &progress)
     } else {
-        scanner::scan_mft_only(root, progress).map_err(|error| {
+        scanner::scan_drive(root, progress).map_err(|error| {
             format!(
-                "MFT scan unavailable: {}. This scan did not complete.",
+                "Drive scan unavailable: {}. This scan did not complete.",
                 error.trim_end_matches('.')
             )
         })
@@ -1324,7 +1356,13 @@ fn read_snapshot(path: &std::path::Path, progress: Arc<Progress>) -> Result<Scan
         .iter()
         .filter(|n| n.allocation_unknown && !n.directory)
         .count() as u64;
-    if !scan.stats.directory_streams_captured {
+    if !scan.stats.directory_streams_captured
+        && scan
+            .stats
+            .filesystem
+            .as_ref()
+            .is_none_or(|fs| fs.eq_ignore_ascii_case("NTFS"))
+    {
         scan.stats.notices.insert(0, "Legacy snapshot: directory-owned data streams were not captured; missing stream accounting cannot be reconstructed from this file. Rescan for current totals.".into());
     }
     Ok(scan)
@@ -1372,6 +1410,42 @@ pub fn cli() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exfat_snapshot_round_trip_preserves_profile_without_legacy_warning_or_authority() {
+        use canopy::model::{Node, Provenance, RuntimeState};
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("exfat.json");
+        let mut scan = Scan {
+            root: "E:\\".into(),
+            nodes: vec![
+                Node::new("E:\\".into(), None, true),
+                Node::new("clip.mp4".into(), Some(0), false),
+            ],
+            stats: Default::default(),
+        };
+        scan.nodes[0].children = vec![1];
+        scan.nodes[1].logical = 100;
+        scan.nodes[1].allocated = 4096;
+        scan.stats.filesystem = Some("exFAT".into());
+        scan.stats.engine = "exFAT directory scan".into();
+        scan.stats.schema_version = 2;
+        scan.stats.runtime = RuntimeState::new(Provenance::Directory);
+        scan.finish();
+        write_snapshot(&scan, &path).unwrap();
+        let loaded = read_snapshot(&path, Arc::default()).unwrap();
+        assert_eq!(loaded.stats.filesystem.as_deref(), Some("exFAT"));
+        assert_eq!(loaded.stats.files, 1);
+        assert_eq!(loaded.nodes[0].allocated, 4096);
+        assert!(
+            loaded
+                .stats
+                .notices
+                .iter()
+                .all(|notice| !notice.contains("Legacy snapshot"))
+        );
+        assert_eq!(loaded.stats.runtime.provenance(), Provenance::Snapshot);
+        assert!(!loaded.deletion_eligible());
+    }
     #[test]
     fn review_regression_case_distinct_snapshot_round_trip_preserves_comparison_keys() {
         use canopy::model::Node;
@@ -1549,7 +1623,7 @@ mod tests {
         std::fs::write(dir.path().join("ordinary.txt"), b"fixture").unwrap();
         let progress = Arc::new(Progress::default());
         let error = run_ui_scan(dir.path().into(), progress.clone(), None).unwrap_err();
-        assert!(error.contains("requires a whole NTFS drive"), "{error}");
+        assert!(error.contains("requires a whole local drive"), "{error}");
         assert!(error.contains("This scan did not complete"), "{error}");
         assert_eq!(progress.files.load(Ordering::Relaxed), 0);
         assert_eq!(progress.folders.load(Ordering::Relaxed), 0);

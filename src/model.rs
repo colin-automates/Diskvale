@@ -8,6 +8,8 @@ use std::{collections::HashMap, path::PathBuf};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Provenance {
     Live,
+    /// Live filesystem enumeration without NTFS deletion authority.
+    Directory,
     #[default]
     Snapshot,
     Replay,
@@ -161,6 +163,8 @@ pub struct MftTimings {
 pub struct ScanStats {
     #[serde(skip)]
     pub runtime: RuntimeState,
+    #[serde(default)]
+    pub filesystem: Option<String>,
     /// FILE_ID_INFO 64-bit volume serial, sampled once per live MFT scan.
     #[serde(default)]
     pub volume_serial: Option<u64>,

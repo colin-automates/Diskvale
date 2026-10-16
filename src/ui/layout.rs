@@ -2,6 +2,45 @@ use super::*;
 use egui::{Align2, Sense};
 
 impl Canopy {
+    #[cfg(windows)]
+    fn drive_choices(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.drive_receiver.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Finding connected drives…");
+            });
+        }
+        for drive in &self.drives {
+            let supported = scanner::DriveScanMethod::for_filesystem(&drive.filesystem).is_some();
+            let response = ui.add_enabled(
+                supported && self.receiver.is_none(),
+                egui::Button::new(format!("{} {}", drive.root.display(), drive.filesystem)),
+            );
+            if response
+                .on_hover_text(if supported {
+                    "Choose this drive for the next scan."
+                } else {
+                    "Supported filesystems: NTFS, exFAT and FAT32."
+                })
+                .clicked()
+            {
+                self.path = drive.root.display().to_string();
+                self.message = format!("Next scan target: {} ({})", self.path, drive.filesystem);
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                self.drive_receiver.is_none(),
+                egui::Button::new("Refresh drives"),
+            )
+            .clicked()
+        {
+            self.refresh_drives(ctx.clone());
+        }
+    }
+
     pub(super) fn size(&self, value: u64) -> String {
         self.units.format(value)
     }
@@ -198,7 +237,7 @@ impl Canopy {
                     let first=self.scan.is_none();
                     let button=egui::Button::new(if first {RichText::new("Scan drive").color(BG).strong()} else {RichText::new("Rescan")});
                     let button=if first {button.fill(ACCENT)} else {button};
-                    if ui.add(button).on_hover_text(format!("Scan {} using the NTFS index",self.path)).clicked() { self.start_scan(ctx.clone()); }
+                    if ui.add(button).on_hover_text(format!("Scan {}. NTFS uses its index; exFAT/FAT32 scans folder metadata.",self.path)).clicked() { self.start_scan(ctx.clone()); }
                 }
                 ui.menu_button("Open / save",|ui| {
                     if ui.add_enabled(self.receiver.is_none(),egui::Button::new("Open saved scan…")).clicked() {
@@ -242,9 +281,13 @@ impl Canopy {
                     ui.horizontal(|ui| {
                         ui.menu_button(RichText::new(&root).size(21.0).strong(),|ui| {
                         #[cfg(windows)]
-                        for drive in &self.drives {if ui.add_enabled(drive.filesystem.eq_ignore_ascii_case("NTFS") && self.receiver.is_none(),egui::Button::new(format!("{} {}",drive.root.display(),drive.filesystem))).clicked(){self.path=drive.root.display().to_string();self.message=format!("Next scan target: {}",self.path);ui.close();}}
+                        self.drive_choices(ui, ctx);
                     }).response.on_hover_text("Choose the drive for the next scan. Current results keep their captured root.");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui| {ui.label(RichText::new("NTFS").size(12.0).color(MUTED));});
+                        #[cfg(windows)]
+                        let filesystem = scan.as_ref().and_then(|s| s.stats.filesystem.as_deref()).or_else(||live.as_ref().map(|d|d.filesystem.as_str())).unwrap_or("Drive");
+                        #[cfg(not(windows))]
+                        let filesystem = scan.as_ref().and_then(|s| s.stats.filesystem.as_deref()).unwrap_or("Drive");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui| {ui.label(RichText::new(filesystem).size(12.0).color(MUTED));});
                     });
                     if let Some((total,free))=space {
                         let used=total.saturating_sub(free); let fraction=free as f32/total.max(1) as f32;
@@ -264,10 +307,7 @@ impl Canopy {
                     ui.add_space(10.0);
                     #[cfg(windows)]
                     ui.menu_button("Choose drive",|ui| {
-                        for drive in &self.drives {
-                            let ntfs=drive.filesystem.eq_ignore_ascii_case("NTFS");
-                            if ui.add_enabled(ntfs && self.receiver.is_none(),egui::Button::new(format!("{} {}",drive.root.display(),drive.filesystem))).clicked() {self.path=drive.root.display().to_string();ui.close();}
-                        }
+                        self.drive_choices(ui, ctx);
                     });
                     let _ = live;
                     return;
@@ -1434,7 +1474,8 @@ impl Canopy {
                         ui.label(if at.elapsed().as_secs()<60 {"Scanned just now".into()}else{format!("Scanned {} min ago",at.elapsed().as_secs()/60)});
                     }
                     ui.separator();
-                    ui.label("Diskvale requires administrator access at launch. Live drive scans read the NTFS index (the MFT), which Windows only lets administrators open.");
+                    ui.label("Diskvale requires administrator access at launch. NTFS drives use the experimental MFT index reader; exFAT/FAT32 drives use a read-only folder scan.");
+                    ui.label(format!("Scan engine: {}", scan.stats.engine));
                     ui.label("The index reader is experimental: matched whole-drive accuracy and speed validation remains pending.");
                     ui.separator();
                     ui.label(format!("{} read errors · {} shared links · {} unknown allocations",count(scan.stats.errors),count(scan.stats.shared_links),count(scan.stats.unknown_allocations)));
@@ -1506,7 +1547,7 @@ impl Canopy {
                         if ui.add(egui::Button::new(RichText::new(format!("Scan {}",self.path)).color(BG).strong()).fill(ACCENT).min_size(vec2(150.0,36.0))).clicked(){self.start_scan(ctx.clone());}
                         if ui.button("Open saved scan…").clicked() && let Some(path)=rfd::FileDialog::new().add_filter("Diskvale snapshot",&["json"]).pick_file(){self.load_scan(ctx.clone(),path);}
                     }
-                    ui.add_space(10.0);ui.label(RichText::new("Whole NTFS drive · bulk metadata scan").size(12.0).color(MUTED));
+                    ui.add_space(10.0);ui.label(RichText::new("NTFS · exFAT · FAT32 · Internal or external drives").size(12.0).color(MUTED));
                     if !self.elevated && self.receiver.is_none() {
                         ui.add_space(6.0);
                         ui.label(RichText::new("Diskvale requires administrator access to open.").size(12.0).color(MUTED));
@@ -1527,6 +1568,7 @@ fn result_state(scan: &Scan) -> &'static str {
     } else {
         match scan.stats.runtime.provenance() {
             Provenance::Live => "Live scan",
+            Provenance::Directory => "Live folder scan · Read only",
             Provenance::Snapshot => "Saved result · Read only",
             Provenance::Replay => "Saved index · Read only",
             Provenance::Incomplete => "Partial scan",
@@ -2446,6 +2488,8 @@ mod tests {
             by_modified: false,
             #[cfg(windows)]
             drives: vec![],
+            #[cfg(windows)]
+            drive_receiver: None,
         }
     }
     #[test]
@@ -2468,6 +2512,7 @@ mod tests {
             assert!(idle.scan.is_none() && idle.receiver.is_none());
             for (provenance, cancelled, label) in [
                 (Provenance::Live, false, "Live scan"),
+                (Provenance::Directory, false, "Live folder scan · Read only"),
                 (Provenance::Snapshot, false, "Saved result · Read only"),
                 (Provenance::Replay, false, "Saved index · Read only"),
                 (Provenance::Incomplete, true, "Partial scan"),
@@ -2699,6 +2744,37 @@ mod tests {
                 ),
                 |ctx| app.render(ctx),
             );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refreshed_exfat_drive_can_be_selected_without_starting_a_scan() {
+        for size in [vec2(1050.0, 700.0), vec2(1400.0, 900.0)] {
+            let ctx = egui::Context::default();
+            configure_ui(&ctx);
+            let mut app = app(None);
+            let (sender, receiver) = mpsc::channel();
+            app.drive_receiver = Some(receiver);
+            sender
+                .send(vec![scanner::windows::Drive {
+                    root: "E:\\".into(),
+                    label: "External fixture".into(),
+                    filesystem: "exFAT".into(),
+                    total: 100_000,
+                    free: 20_000,
+                    serial: 123,
+                }])
+                .unwrap();
+            app.poll();
+            assert!(app.drive_receiver.is_none());
+            assert_eq!(app.drives.len(), 1);
+            click_label(&ctx, &mut app, size, "Choose drive");
+            click_label(&ctx, &mut app, size, "E:\\ exFAT");
+            assert_eq!(app.path, "E:\\");
+            assert!(app.scan.is_none() && app.receiver.is_none());
+            let output = settle(&ctx, &mut app, size);
+            assert!(texts(&output).iter().any(|(text, _, _)| text == "exFAT"));
         }
     }
     fn center_of(app: &Canopy, id: usize) -> egui::Pos2 {
